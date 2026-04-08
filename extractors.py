@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Iterable, List
+from typing import Dict, Iterable, List
 
 from sqlglot import expressions as exp
 
@@ -26,27 +26,49 @@ def _is_star(expression: exp.Expression) -> bool:
     return False
 
 
-def _output_name(expression: exp.Expression) -> str:
+def _restore_placeholders(text: str, placeholder_map: Dict[str, str]) -> str:
+    if not text or not placeholder_map:
+        return text
+    for token, original in placeholder_map.items():
+        text = text.replace(token, original)
+    return text
+
+
+def _expression_sql(
+    expression: exp.Expression,
+    placeholder_map: Dict[str, str],
+    dialect: str = "oracle",
+) -> str:
+    sql = expression.sql(pretty=False, dialect=dialect)
+    return _restore_placeholders(sql, placeholder_map)
+
+
+def _output_name(expression: exp.Expression, placeholder_map: Dict[str, str]) -> str:
     if isinstance(expression, exp.Alias):
         alias = expression.alias
         if isinstance(alias, str) and alias.strip():
-            return alias
+            return _restore_placeholders(alias, placeholder_map)
         alias_name = getattr(alias, "name", None)
         if isinstance(alias_name, str) and alias_name.strip():
-            return alias_name
+            return _restore_placeholders(alias_name, placeholder_map)
     if isinstance(expression, exp.Column) and expression.name:
-        return expression.name
-    return expression.sql(pretty=False, dialect="oracle")
+        return _restore_placeholders(expression.name, placeholder_map)
+    return _expression_sql(expression, placeholder_map, dialect="oracle")
 
 
 def _format_table_name(table: exp.Table) -> str | None:
     if not isinstance(table, exp.Table) or not table.name:
         return None
-    parts = [table.catalog, table.db, table.name]
+    # parts = [table.catalog, table.db, table.name]
+    parts = [table.name]
     return ".".join([part for part in parts if part])
 
 
-def _format_where_sql(expression: exp.Expression, dialect: str = "oracle") -> str:
+def _format_where_sql(
+    expression: exp.Expression,
+    placeholder_map: Dict[str, str],
+    dialect: str = "oracle",
+) -> str:
     if isinstance(expression, exp.Not):
         inner = expression.this
         like_types = [exp.Like]
@@ -58,8 +80,8 @@ def _format_where_sql(expression: exp.Expression, dialect: str = "oracle") -> st
             like_types.append(exp.SimilarTo)
 
         if isinstance(inner, tuple(like_types)):
-            left = inner.this.sql(pretty=False, dialect=dialect)
-            right = inner.expression.sql(pretty=False, dialect=dialect)
+            left = _expression_sql(inner.this, placeholder_map, dialect=dialect)
+            right = _expression_sql(inner.expression, placeholder_map, dialect=dialect)
             if left and right:
                 if hasattr(exp, "ILike") and isinstance(inner, exp.ILike):
                     operator = "ILIKE"
@@ -72,46 +94,46 @@ def _format_where_sql(expression: exp.Expression, dialect: str = "oracle") -> st
                 return f"{left} NOT {operator} {right}"
 
         if isinstance(inner, exp.In):
-            left = inner.this.sql(pretty=False, dialect=dialect)
+            left = _expression_sql(inner.this, placeholder_map, dialect=dialect)
             query = inner.args.get("query")
             expressions = inner.args.get("expressions")
             if query is not None:
-                right = query.sql(pretty=False, dialect=dialect)
+                right = _expression_sql(query, placeholder_map, dialect=dialect)
             elif expressions:
-                right = f"({', '.join(expr.sql(pretty=False, dialect=dialect) for expr in expressions)})"
+                right = f"({', '.join(_expression_sql(expr, placeholder_map, dialect=dialect) for expr in expressions)})"
             else:
                 right = ""
             if left and right:
                 return f"{left} NOT IN {right}"
 
         if isinstance(inner, exp.Between):
-            left = inner.this.sql(pretty=False, dialect=dialect)
+            left = _expression_sql(inner.this, placeholder_map, dialect=dialect)
             low = inner.args.get("low")
             high = inner.args.get("high")
             symmetric = inner.args.get("symmetric")
             if left and low is not None and high is not None:
                 symmetric_sql = " SYMMETRIC" if symmetric else ""
-                low_sql = low.sql(pretty=False, dialect=dialect)
-                high_sql = high.sql(pretty=False, dialect=dialect)
+                low_sql = _expression_sql(low, placeholder_map, dialect=dialect)
+                high_sql = _expression_sql(high, placeholder_map, dialect=dialect)
                 return f"{left} NOT BETWEEN{symmetric_sql} {low_sql} AND {high_sql}"
-    return expression.sql(pretty=False, dialect=dialect)
+    return _expression_sql(expression, placeholder_map, dialect=dialect)
 
 
-def extract_column_list(ast: exp.Expression) -> str:
+def extract_column_list(ast: exp.Expression, placeholder_map: Dict[str, str]) -> str:
     """Trích xuất danh sách cột trong SELECT (projection)."""
     columns: List[str] = []
     for select in iter_selects(ast):
         for expression in select.expressions or []:
             if _is_star(expression):
-                columns.append(expression.sql(pretty=False, dialect="oracle"))
+                columns.append(_expression_sql(expression, placeholder_map, dialect="oracle"))
                 continue
-            name = _output_name(expression)
+            name = _output_name(expression, placeholder_map)
             if name:
                 columns.append(name)
     return ", ".join(_dedup_preserve_order(columns))
 
 
-def extract_table_list(ast: exp.Expression) -> str:
+def extract_table_list(ast: exp.Expression, placeholder_map: Dict[str, str]) -> str:
     """Trích xuất danh sách bảng xuất hiện trong câu lệnh."""
     tables: List[str] = []
     for table in iter_tables(ast):
@@ -121,13 +143,23 @@ def extract_table_list(ast: exp.Expression) -> str:
     return ", ".join(_dedup_preserve_order(tables))
 
 
-def extract_where_list(ast: exp.Expression) -> str:
+def extract_where_list(ast: exp.Expression, placeholder_map: Dict[str, str]) -> str:
     """Trích xuất danh sách điều kiện WHERE dưới dạng SQL thuần."""
     wheres: List[str] = []
     for select in iter_selects(ast):
         where = select.args.get("where")
         if isinstance(where, exp.Where) and where.this is not None:
-            sql = _format_where_sql(where.this, dialect="oracle")
+            sql = _format_where_sql(where.this, placeholder_map, dialect="oracle")
             if sql:
                 wheres.append(sql)
     return " | ".join(_dedup_preserve_order(wheres))
+
+
+def extract_schema_list(ast: exp.Expression, placeholder_map: Dict[str, str]) -> str:
+    """Trích xuất danh sách schema từ các bảng xuất hiện trong câu lệnh."""
+    schemas: List[str] = []
+    for table in iter_tables(ast):
+        schema_name = table.db or table.catalog
+        if schema_name:
+            schemas.append(schema_name)
+    return ", ".join(_dedup_preserve_order(schemas))

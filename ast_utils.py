@@ -6,7 +6,7 @@ from sqlglot import expressions as exp
 
 
 def iter_children(node: Any) -> Iterable[Any]:
-    """Iterate children via node.args values (Expressions and lists)."""
+    """Duyệt các node con thông qua node.args (Expression và list)."""
     if not hasattr(node, "args"):
         return []
     for value in node.args.values():
@@ -21,14 +21,14 @@ def iter_children(node: Any) -> Iterable[Any]:
 
 
 def iter_selects(ast: Any) -> Iterable[Any]:
-    """Yield SELECT nodes via find_all(exp.Select)."""
+    """Trả về các node SELECT qua find_all(exp.Select)."""
     if isinstance(ast, exp.Expression):
         yield from ast.find_all(exp.Select)
     return []
 
 
 def iter_tables(ast: Any) -> Iterable[Any]:
-    """Yield TABLE nodes via find_all(exp.Table); only valid names."""
+    """Trả về các node TABLE qua find_all(exp.Table); chỉ lấy tên hợp lệ."""
     if isinstance(ast, exp.Expression):
         for table in ast.find_all(exp.Table):
             if getattr(table, "name", None):
@@ -37,7 +37,7 @@ def iter_tables(ast: Any) -> Iterable[Any]:
 
 
 def iter_columns(node: Any) -> Iterable[Any]:
-    """Yield COLUMN nodes via find_all(exp.Column); skip STAR when needed."""
+    """Trả về các node COLUMN qua find_all(exp.Column); bỏ qua STAR khi cần."""
     if isinstance(node, exp.Expression):
         for col in node.find_all(exp.Column):
             yield col
