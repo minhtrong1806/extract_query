@@ -84,3 +84,4 @@ desktop.ini
 *.db
 
 .agents/
+output/
