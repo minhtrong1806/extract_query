@@ -6,12 +6,14 @@ import pandas as pd
 
 from extractor import extract_schema_table_column_rows
 from parser import parse_select_statement
+from logger import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__, log_to_file=True, log_dir="./logs")
 
 
 def build_output_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     """Tạo DataFrame đầu ra theo từng cột với SCHEMA/TABLE/COLUMN."""
+    logger.info("Bat dau build_output_dataframe: %s dong", len(df))
     working_df = df.copy()
     working_df["AST"] = working_df["SELECT_STATEMENT_CLEANED"].apply(parse_select_statement)
     select_mask = working_df["READ_MODE"].eq("Select")
@@ -26,6 +28,7 @@ def build_output_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         cleaned_sql = row.SELECT_STATEMENT_CLEANED
         if parse_result.ast is None:
             continue
+        logger.info("Dang xu ly SELECT_STATEMENT")
         extracted_rows = extract_schema_table_column_rows(
             parse_result.ast,
             parse_result.placeholder_map,
@@ -61,7 +64,9 @@ def build_output_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         columns=["CATALOG", "SCHEMA", "TABLE", "COLUMN", "CLAUSE", "SELECT_STATEMENT"],
     )
     if output_df.empty:
+        logger.warning("Output rong sau khi trich xuat")
         return output_df
+    logger.info("Sap xep output theo CATALOG/SCHEMA/TABLE/COLUMN")
     return output_df.sort_values(
         by=["CATALOG", "SCHEMA", "TABLE", "COLUMN"],
         ascending=[True, True, True, True],

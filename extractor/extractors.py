@@ -23,8 +23,9 @@ from .formatting import (
 from .resolvers import _extract_rows_from_select as _resolve_rows_from_select
 from .resolvers import _resolve_column_rows
 from .stages import CatalogColumnStage, CatalogTableStage, QueryBlockStage
+from logger import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__, log_to_file=True, log_dir="./logs")
 
 
 def _write_jsonl(file_path: str, records: List[dict]) -> None:
@@ -103,8 +104,11 @@ def extract_schema_table_column_rows(
     results: List[dict[str, str]] = []
     global_cte_index = build_global_cte_index(ast)
 
+    logger.info("Bat dau trich xuat rows tu AST")
+
     query_block_stage = QueryBlockStage()
     query_blocks, node_to_block = query_block_stage.run(ast, placeholder_map)
+    logger.info("QueryBlockStage hoan tat: %s blocks", len(query_blocks))
 
     catalog_table_stage = CatalogTableStage()
     catalog_tables, select_context_by_block = catalog_table_stage.run(
@@ -114,6 +118,7 @@ def extract_schema_table_column_rows(
         sql_text,
         global_cte_index,
     )
+    logger.info("CatalogTableStage hoan tat: %s tables", len(catalog_tables))
 
     catalog_column_stage = CatalogColumnStage()
     catalog_columns = catalog_column_stage.run(
@@ -122,11 +127,13 @@ def extract_schema_table_column_rows(
         select_context_by_block,
         placeholder_map,
     )
+    logger.info("CatalogColumnStage hoan tat: %s columns", len(catalog_columns))
 
     base_output_dir = os.path.join(os.getcwd(), "output", "temp")
     _write_jsonl(os.path.join(base_output_dir, "query_blocks.jsonl"), query_blocks)
     _write_jsonl(os.path.join(base_output_dir, "catalog_tables.jsonl"), catalog_tables)
     _write_jsonl(os.path.join(base_output_dir, "catalog_columns.jsonl"), catalog_columns)
+    logger.info("Da ghi stage output vao %s", base_output_dir)
 
     for column in catalog_columns:
         results.append(
@@ -139,5 +146,7 @@ def extract_schema_table_column_rows(
                 "CLAUSE": column.get("clause_type", ""),
             }
         )
+
+    logger.info("Hoan tat trich xuat: %s rows", len(results))
 
     return results
