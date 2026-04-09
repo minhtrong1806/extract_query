@@ -414,3 +414,11 @@ def test_cte_alias_in_join_resolves_base_table_for_alias_column():
         "CTE_SINGLE_TABLE_FALLBACK",
         "PROJECTION",
     ) in row_set
+
+
+def test_placeholder_column_resolves_to_dual():
+    """Cột có placeholder #...# phải resolve về DUAL."""
+    sql = "SELECT #PDATE# AS RUN_DATE FROM DUAL"
+    rows = _extract_rows(sql)
+    row_set = _as_set(rows)
+    assert ("", "", "DUAL", "#PDATE#", "PLACEHOLDER_COLUMN", "PROJECTION") in row_set

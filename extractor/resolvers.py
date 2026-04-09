@@ -215,6 +215,9 @@ def _resolve_column_rows(
     allow_first_table = policy.get("allow_first_table", True)
     allow_table_plus_subquery = policy.get("allow_table_plus_subquery", True)
 
+    if "#" in column_name:
+        return [_make_row("", "", "dual", column_name, "PLACEHOLDER_COLUMN", placeholder_map)]
+
     def _resolve_from_subquery(
         subquery_expr: exp.Expression,
         nested_target: str,
