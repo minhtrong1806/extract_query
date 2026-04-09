@@ -43,8 +43,8 @@ def test_join_with_alias_and_schema():
     """
     rows = _extract_rows(sql)
     row_set = _as_set(rows)
-    assert ("", "sch1", "table1", "col1", "", "PROJECTION") in row_set
-    assert ("", "", "table2", "col2", "", "PROJECTION") in row_set
+    assert ("", "SCH1", "TABLE1", "COL1", "", "PROJECTION") in row_set
+    assert ("", "", "TABLE2", "COL2", "", "PROJECTION") in row_set
 
 
 def test_cte_resolves_to_base_table():
@@ -59,7 +59,7 @@ def test_cte_resolves_to_base_table():
     """
     rows = _extract_rows(sql)
     row_set = _as_set(rows)
-    assert ("", "sch2", "t_users", "id", "", "PROJECTION") in row_set
+    assert ("", "SCH2", "T_USERS", "ID", "", "PROJECTION") in row_set
 
 
 def test_union_subquery_returns_multiple_sources():
@@ -74,8 +74,8 @@ def test_union_subquery_returns_multiple_sources():
     """
     rows = _extract_rows(sql)
     row_set = _as_set(rows)
-    assert ("", "", "t_a", "col1", "", "PROJECTION") in row_set
-    assert ("", "", "t_b", "col1", "", "PROJECTION") in row_set
+    assert ("", "", "T_A", "COL1", "", "PROJECTION") in row_set
+    assert ("", "", "T_B", "COL1", "", "PROJECTION") in row_set
 
 
 def test_star_alias_fallback_for_unqualified_column():
@@ -83,7 +83,7 @@ def test_star_alias_fallback_for_unqualified_column():
     sql = "SELECT a.*, col1 FROM sch.star_table a"
     rows = _extract_rows(sql)
     row_set = _as_set(rows)
-    assert ("", "sch", "star_table", "col1", "", "PROJECTION") in row_set
+    assert ("", "SCH", "STAR_TABLE", "COL1", "", "PROJECTION") in row_set
 
 
 def test_quoted_identifiers_schema_table():
@@ -91,7 +91,7 @@ def test_quoted_identifiers_schema_table():
     sql = 'SELECT t.col FROM "MYSCHEMA"."MYTABLE" t'
     rows = _extract_rows(sql)
     row_set = _as_set(rows)
-    assert ("", "MYSCHEMA", "MYTABLE", "col", "", "PROJECTION") in row_set
+    assert ("", "MYSCHEMA", "MYTABLE", "COL", "", "PROJECTION") in row_set
 
 
 def test_first_table_fallback_for_unqualified_column():
@@ -99,7 +99,7 @@ def test_first_table_fallback_for_unqualified_column():
     sql = "SELECT col1 FROM t1 JOIN t2 ON t1.id = t2.id"
     rows = _extract_rows(sql)
     row_set = _as_set(rows)
-    assert ("", "", "t1", "col1", "FIRST_TABLE_FALLBACK", "PROJECTION") in row_set
+    assert ("", "", "T1", "COL1", "FIRST_TABLE_FALLBACK", "PROJECTION") in row_set
 
 
 def test_subquery_any_table_fallback_for_ambiguous_subquery():
@@ -114,7 +114,7 @@ def test_subquery_any_table_fallback_for_ambiguous_subquery():
     """
     rows = _extract_rows(sql)
     row_set = _as_set(rows)
-    assert ("", "", "t1", "col1", "SUBQUERY_ANY_TABLE_FALLBACK", "PROJECTION") in row_set
+    assert ("", "", "T1", "COL1", "SUBQUERY_ANY_TABLE_FALLBACK", "PROJECTION") in row_set
 
 
 def test_subquery_unresolved_reason():
@@ -122,7 +122,7 @@ def test_subquery_unresolved_reason():
     sql = "SELECT col1 FROM (SELECT 1 AS x) s"
     rows = _extract_rows(sql)
     row_set = _as_set(rows)
-    assert ("", "", "", "col1", "SUBQUERY_SOURCE_ONLY", "PROJECTION") in row_set
+    assert ("", "", "", "COL1", "SUBQUERY_SOURCE_ONLY", "PROJECTION") in row_set
 
 
 def test_unresolved_table_reason_for_unknown_alias():
@@ -130,7 +130,7 @@ def test_unresolved_table_reason_for_unknown_alias():
     sql = "SELECT x.col1 FROM t1 JOIN t2 ON t1.id = t2.id"
     rows = _extract_rows(sql, sql_text="")
     row_set = _as_set(rows)
-    assert ("", "", "", "col1", "UNRESOLVED_TABLE", "PROJECTION") in row_set
+    assert ("", "", "", "COL1", "UNRESOLVED_TABLE", "PROJECTION") in row_set
 
 
 def test_subquery_join_resolves_nested_column_alias():
@@ -146,7 +146,7 @@ def test_subquery_join_resolves_nested_column_alias():
     """
     rows = _extract_rows(sql)
     row_set = _as_set(rows)
-    assert ("", "", "base_table", "verify_decision", "", "PROJECTION") in row_set
+    assert ("", "", "BASE_TABLE", "VERIFY_DECISION", "", "PROJECTION") in row_set
 
 
 def test_cte_resolves_column_via_joined_subquery():
@@ -162,7 +162,7 @@ def test_cte_resolves_column_via_joined_subquery():
     """
     rows = _extract_rows(sql)
     row_set = _as_set(rows)
-    assert ("", "", "base_table", "code", "", "PROJECTION") in row_set
+    assert ("", "", "BASE_TABLE", "CODE", "", "PROJECTION") in row_set
 
 
 def test_cte_union_all_resolves_base_tables_for_column():
@@ -281,4 +281,136 @@ def test_derived_column_from_cte_chain_returns_derived_table():
     """
     rows = _extract_rows(sql)
     row_set = _as_set(rows)
-    assert ("", "", "dual", "STATUS", "DERIVED_COLUMN", "PROJECTION") in row_set
+    assert ("", "", "DUAL", "STATUS", "DERIVED_COLUMN", "PROJECTION") in row_set
+
+
+def test_cte_alias_star_resolves_columns_to_base_table():
+    """CTE alias với A.* vẫn resolve về bảng gốc (STAR_ALIAS_FALLBACK)."""
+    sql = """
+        WITH tem_txn AS (
+            SELECT A.*, MT.TRANSACTION_NO TMP_SEQ_NO
+            FROM KM_JASPER.RPT_BSS081_NAPAS_TXN A
+            JOIN KMDW.STA_RB_ACCT C ON A.ACCT_NO = C.ACCT_NO
+            LEFT JOIN KMDW.FT_MEMO_TRAN_HIST MT ON A.TRANSACTION_NO = MT.RTH_SEQ_NO
+        )
+        SELECT T.ACCT_NO, T.ACCT_EXEC
+        FROM tem_txn T
+    """
+    rows = _extract_rows(sql)
+    row_set = _as_set(rows)
+    assert (
+        "",
+        "KM_JASPER",
+        "RPT_BSS081_NAPAS_TXN",
+        "ACCT_NO",
+        "STAR_ALIAS_FALLBACK",
+        "PROJECTION",
+    ) in row_set
+    assert (
+        "",
+        "KM_JASPER",
+        "RPT_BSS081_NAPAS_TXN",
+        "ACCT_EXEC",
+        "STAR_ALIAS_FALLBACK",
+        "PROJECTION",
+    ) in row_set
+
+
+def test_subquery_join_star_resolves_columns_in_clauses():
+    """Subquery JOIN có SELECT * vẫn resolve cột ở PROJECTION/WHERE/JOIN_ON."""
+    sql = """
+        SELECT v.col1
+        FROM t_main m
+        JOIN (SELECT * FROM sch.sub_table) v ON m.id = v.id
+        WHERE v.col1 IS NOT NULL
+    """
+    rows = _extract_rows(sql)
+    row_set = _as_set(rows)
+    assert ("", "SCH", "SUB_TABLE", "COL1", "", "PROJECTION") in row_set
+    assert ("", "SCH", "SUB_TABLE", "COL1", "", "WHERE") in row_set
+    assert ("", "SCH", "SUB_TABLE", "ID", "", "JOIN_ON") in row_set
+
+
+def test_order_by_alias_derived_resolves_to_dual():
+    """ORDER BY alias của biểu thức thuần trả về DUAL với DERIVED_COLUMN."""
+    sql = "SELECT 1 AS cnt FROM dual ORDER BY cnt"
+    rows = _extract_rows(sql)
+    row_set = _as_set(rows)
+    assert ("", "", "DUAL", "CNT", "DERIVED_COLUMN", "ORDER_BY") in row_set
+
+
+def test_nested_select_output_resolves_column_from_cte_alias():
+    """Truy vết cột ở select lồng trong CTE khi outer không select trực tiếp."""
+    sql = """
+        WITH tem_txn AS (
+            SELECT x.SYM_RUN_DATE, x.MODULE
+            FROM (
+                SELECT a.SYM_RUN_DATE,
+                       'MM' MODULE,
+                       (a.MATURITY - a.VALUE_DATE) TERM
+                FROM KMDW.FT_MM_BALANCE a
+            ) x
+        )
+        SELECT T.SYM_RUN_DATE
+        FROM tem_txn T
+        WHERE T.TERM > 0
+    """
+    rows = _extract_rows(sql)
+    row_set = _as_set(rows)
+    assert ("", "KMDW", "FT_MM_BALANCE", "TERM", "", "WHERE") in row_set
+
+
+def test_cte_select_star_with_exists_resolves_base_table_column():
+    """CTE SELECT * với EXISTS vẫn resolve cột về bảng gốc thay vì tên CTE."""
+    sql = """
+        WITH TMP_LOAN_T AS (
+            SELECT *
+            FROM KMDW.FT_LOAN_DD_BALANCE_STATIC S
+            WHERE EXISTS (
+                SELECT LOAN_NO
+                FROM TMP_LOAN_INFOR I
+                WHERE S.LOAN_NO = I.LOAN_NO
+            )
+        )
+        SELECT S.LOAN_NO
+        FROM TMP_LOAN_T S
+    """
+    rows = _extract_rows(sql)
+    row_set = _as_set(rows)
+    assert (
+        "",
+        "KMDW",
+        "FT_LOAN_DD_BALANCE_STATIC",
+        "LOAN_NO",
+        "SUBQUERY_STAR_FALLBACK",
+        "PROJECTION",
+    ) in row_set
+
+
+def test_cte_alias_in_join_resolves_base_table_for_alias_column():
+    """Alias CTE trong JOIN resolve về bảng gốc, không trả về tên CTE."""
+    sql = """
+        WITH TMP_LOAN_T AS (
+            SELECT *
+            FROM KMDW.FT_LOAN_DD_BALANCE_STATIC S
+            WHERE S.SYM_RUN_DATE = KM_GET_RUN_DATE
+        ),
+        TMP_LOAN_T1 AS (
+            SELECT *
+            FROM KMDW.FT_LOAN_DD_BALANCE_STATIC S
+            WHERE S.SYM_RUN_DATE = KM_GET_RUN_DATE-1
+        )
+        SELECT S1.LOAN_NO
+        FROM TMP_LOAN_T S
+        LEFT JOIN TMP_LOAN_T1 S1 ON S.LOAN_NO = S1.LOAN_NO
+    """
+    rows = _extract_rows(sql)
+    row_set = _as_set(rows)
+    assert (
+        "",
+        "KMDW",
+        "FT_LOAN_DD_BALANCE_STATIC",
+        "LOAN_NO",
+        "CTE_SINGLE_TABLE_FALLBACK",
+        "PROJECTION",
+    ) in row_set

@@ -111,14 +111,30 @@ def _resolve_alias(node: exp.Expression | None) -> str | None:
     """Resolve alias/name theo logic extractor_package."""
     if node is None:
         return None
-    alias_or_name = getattr(node, "alias_or_name", None)
-    if isinstance(alias_or_name, str) and alias_or_name.strip():
-        return alias_or_name.strip()
-    alias_node = getattr(node, "alias", None)
-    alias_name = getattr(alias_node, "name", None)
-    if isinstance(alias_name, str) and alias_name.strip():
-        return alias_name.strip()
-    name = getattr(node, "name", None)
+    args = getattr(node, "args", {}) or {}
+
+    alias_node = args.get("alias")
+    if isinstance(alias_node, exp.TableAlias):
+        alias_name = getattr(alias_node, "name", None)
+        if isinstance(alias_name, str) and alias_name.strip():
+            return alias_name.strip()
+        alias_this = getattr(alias_node, "this", None)
+        if isinstance(alias_this, exp.Identifier) and alias_this.name:
+            return alias_this.name.strip()
+    elif isinstance(alias_node, exp.Alias):
+        alias_name = getattr(alias_node, "name", None)
+        if isinstance(alias_name, str) and alias_name.strip():
+            return alias_name.strip()
+        alias_this = getattr(alias_node, "this", None)
+        if isinstance(alias_this, exp.Identifier) and alias_this.name:
+            return alias_this.name.strip()
+
+    this = args.get("this")
+    if isinstance(this, exp.Identifier) and this.name:
+        return this.name.strip()
+    if isinstance(this, str) and this.strip():
+        return this.strip()
+    name = args.get("name")
     if isinstance(name, str) and name.strip():
         return name.strip()
     return None

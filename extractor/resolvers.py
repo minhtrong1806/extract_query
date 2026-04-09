@@ -64,6 +64,21 @@ def _subquery_output_is_derived(node: exp.Expression, placeholder_map: Dict[str,
     return False
 
 
+def _subquery_has_star(node: exp.Expression) -> bool:
+    if isinstance(node, exp.Subquery) and isinstance(node.this, exp.Expression):
+        return _subquery_has_star(node.this)
+    if isinstance(node, exp.Select):
+        for expression in node.expressions or []:
+            if isinstance(expression, exp.Star):
+                return True
+            if isinstance(expression, exp.Column) and bool(getattr(expression, "is_star", False)):
+                return True
+        return False
+    if isinstance(node, exp.SetOperation):
+        return _subquery_has_star(node.this) or _subquery_has_star(node.expression)
+    return False
+
+
 def _make_row(
     catalog_name: str,
     schema_name: str,
@@ -72,11 +87,14 @@ def _make_row(
     reason: str,
     placeholder_map: Dict[str, str],
 ) -> dict[str, str]:
+    def _upper(value: str) -> str:
+        return value.upper() if value else value
+
     return {
-        "CATALOG": _restore_placeholders(catalog_name, placeholder_map),
-        "SCHEMA": _restore_placeholders(schema_name, placeholder_map),
-        "TABLE": _restore_placeholders(table_name, placeholder_map),
-        "COLUMN": column_name,
+        "CATALOG": _upper(_restore_placeholders(catalog_name, placeholder_map)),
+        "SCHEMA": _upper(_restore_placeholders(schema_name, placeholder_map)),
+        "TABLE": _upper(_restore_placeholders(table_name, placeholder_map)),
+        "COLUMN": _upper(column_name),
         "REASON": reason,
     }
 
@@ -147,6 +165,40 @@ def _extract_rows_from_any_subquery(
     return merged
 
 
+def _extract_rows_from_nested_selects(
+    node: exp.Expression,
+    placeholder_map: Dict[str, str],
+    target_column: str,
+    cte_index: Dict[str, exp.Expression] | None = None,
+    visited: set[tuple[int, str]] | None = None,
+) -> List[dict[str, str]]:
+    if not isinstance(node, exp.Expression):
+        return []
+    if visited is None:
+        visited = set()
+    merged: List[dict[str, str]] = []
+    seen = set()
+    for select in node.find_all(exp.Select):
+        select_key = (id(select), target_column.lower())
+        if select_key in visited:
+            continue
+        visited.add(select_key)
+        rows = _extract_rows_from_select(
+            select,
+            placeholder_map,
+            target_column,
+            cte_index=cte_index,
+            visited=visited,
+        )
+        for item in rows:
+            key = (item.get("CATALOG"), item.get("SCHEMA"), item.get("TABLE"), item.get("COLUMN"))
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(item)
+    return merged
+
+
 def _resolve_column_rows(
     ctx: SelectContext,
     column: exp.Column,
@@ -163,26 +215,14 @@ def _resolve_column_rows(
     allow_first_table = policy.get("allow_first_table", True)
     allow_table_plus_subquery = policy.get("allow_table_plus_subquery", True)
 
-    if strict_unqualified and not (column.table or "").strip():
-        return [_make_row("", "", "", column_name, "UNRESOLVED_TABLE", placeholder_map)]
-
-    resolved_table = _resolve_table_for_column(column, ctx.alias_map, ctx.tables)
-    if resolved_table is not None:
-        schema_name = resolved_table.db or resolved_table.catalog or ""
-        table_name = resolved_table.name or ""
-        return [_make_row(resolved_table.catalog or "", schema_name, table_name, column_name, "", placeholder_map)]
-
-    if not ctx.tables and len(ctx.fallback_tables) == 1:
-        single = ctx.fallback_tables[0]
-        schema_name = single.db or single.catalog or ""
-        table_name = single.name or ""
-        return [_make_row(single.catalog or "", schema_name, table_name, column_name, "", placeholder_map)]
-
-    resolved_subquery = _resolve_subquery_for_column(column, ctx.subquery_alias_map)
-    if resolved_subquery is not None:
-        nested_target = column.name or column_name
+    def _resolve_from_subquery(
+        subquery_expr: exp.Expression,
+        nested_target: str,
+        *,
+        allow_alias_fallback: bool,
+    ) -> List[dict[str, str]]:
         subquery_rows = _extract_rows_from_subquery(
-            resolved_subquery,
+            subquery_expr,
             placeholder_map,
             nested_target,
             cte_index=ctx.cte_index,
@@ -193,48 +233,145 @@ def _resolve_column_rows(
                 return [
                     {
                         **row,
-                        "COLUMN": column_name,
+                        "COLUMN": column_name.upper() if column_name else column_name,
                     }
                     for row in subquery_rows
                 ]
             return subquery_rows
-        if _subquery_output_is_derived(resolved_subquery, placeholder_map, nested_target):
+
+        nested_rows = _extract_rows_from_nested_selects(
+            subquery_expr,
+            placeholder_map,
+            nested_target,
+            cte_index=ctx.cte_index,
+            visited=visited,
+        )
+        if nested_rows:
+            if nested_target != column_name:
+                return [
+                    {
+                        **row,
+                        "COLUMN": column_name.upper() if column_name else column_name,
+                    }
+                    for row in nested_rows
+                ]
+            return nested_rows
+
+        if _subquery_has_star(subquery_expr):
+            single_table = _resolve_single_table_from_subquery(subquery_expr, cte_index=ctx.cte_index)
+            if single_table is not None:
+                schema_name = single_table.db or single_table.catalog or ""
+                table_name = single_table.name or ""
+                return [_make_row(single_table.catalog or "", schema_name, table_name, column_name, "SUBQUERY_STAR_FALLBACK", placeholder_map)]
+            collected_tables = _collect_tables_from_expression(subquery_expr, cte_index=ctx.cte_index)
+            if collected_tables:
+                table = collected_tables[0]
+                schema_name = table.db or table.catalog or ""
+                table_name = table.name or ""
+                return [_make_row(table.catalog or "", schema_name, table_name, column_name, "SUBQUERY_STAR_FALLBACK", placeholder_map)]
+
+        if _subquery_output_is_derived(subquery_expr, placeholder_map, nested_target):
             return [_make_row("", "", "dual", column_name, "DERIVED_COLUMN", placeholder_map)]
-        single_table = _resolve_single_table_from_subquery(resolved_subquery, cte_index=ctx.cte_index)
+
+        single_table = _resolve_single_table_from_subquery(subquery_expr, cte_index=ctx.cte_index)
         if single_table is not None:
             schema_name = single_table.db or single_table.catalog or ""
             table_name = single_table.name or ""
             return [_make_row(single_table.catalog or "", schema_name, table_name, column_name, "", placeholder_map)]
-        if _subquery_has_output(resolved_subquery, placeholder_map, nested_target):
+
+        if _subquery_has_output(subquery_expr, placeholder_map, nested_target):
             return [_make_row("", "", "dual", column_name, "DERIVED_COLUMN", placeholder_map)]
-        alias_name = (column.table or "").strip()
-        if alias_name:
-            return [_make_row("", "", alias_name, column_name, "SUBQUERY_ALIAS_FALLBACK", placeholder_map)]
+
+        if allow_alias_fallback:
+            alias_name = (column.table or "").strip()
+            if alias_name:
+                return [_make_row("", "", alias_name, column_name, "SUBQUERY_ALIAS_FALLBACK", placeholder_map)]
+
+        return []
+
+    if strict_unqualified and not (column.table or "").strip():
+        return [_make_row("", "", "", column_name, "UNRESOLVED_TABLE", placeholder_map)]
+
+    resolved_table = _resolve_table_for_column(column, ctx.alias_map, ctx.tables)
+    if resolved_table is not None:
+        table_key = (resolved_table.name or "").strip().lower()
+        if table_key and table_key in ctx.cte_index:
+            nested_target = column.name or column_name
+            resolved_rows = _resolve_from_subquery(
+                ctx.cte_index[table_key],
+                nested_target,
+                allow_alias_fallback=False,
+            )
+            if resolved_rows:
+                return resolved_rows
+            single_table = _resolve_single_table_from_subquery(ctx.cte_index[table_key], cte_index=ctx.cte_index)
+            if single_table is not None:
+                schema_name = single_table.db or single_table.catalog or ""
+                table_name = single_table.name or ""
+                return [_make_row(single_table.catalog or "", schema_name, table_name, column_name, "CTE_SINGLE_TABLE_FALLBACK", placeholder_map)]
+            collected_tables = _collect_tables_from_expression(ctx.cte_index[table_key], cte_index=ctx.cte_index)
+            if collected_tables:
+                table = collected_tables[0]
+                schema_name = table.db or table.catalog or ""
+                table_name = table.name or ""
+                return [_make_row(table.catalog or "", schema_name, table_name, column_name, "CTE_ANY_TABLE_FALLBACK", placeholder_map)]
+        schema_name = resolved_table.db or resolved_table.catalog or ""
+        table_name = resolved_table.name or ""
+        return [_make_row(resolved_table.catalog or "", schema_name, table_name, column_name, "", placeholder_map)]
+
+    if not ctx.tables and len(ctx.fallback_tables) == 1:
+        single = ctx.fallback_tables[0]
+        table_key = (single.name or "").strip().lower()
+        if table_key and table_key in ctx.cte_index:
+            nested_target = column.name or column_name
+            resolved_rows = _resolve_from_subquery(
+                ctx.cte_index[table_key],
+                nested_target,
+                allow_alias_fallback=False,
+            )
+            if resolved_rows:
+                return resolved_rows
+            single_table = _resolve_single_table_from_subquery(ctx.cte_index[table_key], cte_index=ctx.cte_index)
+            if single_table is not None:
+                schema_name = single_table.db or single_table.catalog or ""
+                table_name = single_table.name or ""
+                return [_make_row(single_table.catalog or "", schema_name, table_name, column_name, "CTE_SINGLE_TABLE_FALLBACK", placeholder_map)]
+            collected_tables = _collect_tables_from_expression(ctx.cte_index[table_key], cte_index=ctx.cte_index)
+            if collected_tables:
+                table = collected_tables[0]
+                schema_name = table.db or table.catalog or ""
+                table_name = table.name or ""
+                return [_make_row(table.catalog or "", schema_name, table_name, column_name, "CTE_ANY_TABLE_FALLBACK", placeholder_map)]
+        schema_name = single.db or single.catalog or ""
+        table_name = single.name or ""
+        return [_make_row(single.catalog or "", schema_name, table_name, column_name, "", placeholder_map)]
+
+    resolved_subquery = _resolve_subquery_for_column(column, ctx.subquery_alias_map)
+    if resolved_subquery is not None:
+        nested_target = column.name or column_name
+        allow_alias_fallback = True
+        if ctx.cte_index:
+            cte_nodes = set(ctx.cte_index.values())
+            if resolved_subquery in cte_nodes:
+                allow_alias_fallback = False
+        resolved_rows = _resolve_from_subquery(
+            resolved_subquery,
+            nested_target,
+            allow_alias_fallback=allow_alias_fallback,
+        )
+        if resolved_rows:
+            return resolved_rows
 
     if allow_table_plus_subquery and not (column.table or "").strip():
         if len(ctx.tables) == 1 and len(ctx.subqueries) == 1:
             nested_target = column.name or column_name
-            subquery_rows = _extract_rows_from_subquery(
+            resolved_rows = _resolve_from_subquery(
                 ctx.subqueries[0],
-                placeholder_map,
                 nested_target,
-                cte_index=ctx.cte_index,
-                visited=visited,
+                allow_alias_fallback=False,
             )
-            if subquery_rows:
-                if nested_target != column_name:
-                    return [
-                        {
-                            **row,
-                            "COLUMN": column_name,
-                        }
-                        for row in subquery_rows
-                    ]
-                return subquery_rows
-            if _subquery_output_is_derived(ctx.subqueries[0], placeholder_map, nested_target):
-                return [_make_row("", "", "dual", column_name, "DERIVED_COLUMN", placeholder_map)]
-            if _subquery_has_output(ctx.subqueries[0], placeholder_map, nested_target):
-                return [_make_row("", "", "dual", column_name, "DERIVED_COLUMN", placeholder_map)]
+            if resolved_rows:
+                return resolved_rows
             only_table = ctx.tables[0]
             schema_name = only_table.db or only_table.catalog or ""
             table_name = only_table.name or ""
@@ -244,6 +381,27 @@ def _resolve_column_rows(
         text_resolution = _resolve_table_from_text_alias(column, ctx.text_alias_map, ctx.text_tables)
         if text_resolution is not None:
             schema_name, table_name = text_resolution
+            cte_key = (table_name or "").strip().lower()
+            if cte_key and cte_key in ctx.cte_index:
+                nested_target = column.name or column_name
+                resolved_rows = _resolve_from_subquery(
+                    ctx.cte_index[cte_key],
+                    nested_target,
+                    allow_alias_fallback=False,
+                )
+                if resolved_rows:
+                    return resolved_rows
+                single_table = _resolve_single_table_from_subquery(ctx.cte_index[cte_key], cte_index=ctx.cte_index)
+                if single_table is not None:
+                    schema_name = single_table.db or single_table.catalog or ""
+                    table_name = single_table.name or ""
+                    return [_make_row(single_table.catalog or "", schema_name, table_name, column_name, "CTE_SINGLE_TABLE_FALLBACK", placeholder_map)]
+                collected_tables = _collect_tables_from_expression(ctx.cte_index[cte_key], cte_index=ctx.cte_index)
+                if collected_tables:
+                    table = collected_tables[0]
+                    schema_name = table.db or table.catalog or ""
+                    table_name = table.name or ""
+                    return [_make_row(table.catalog or "", schema_name, table_name, column_name, "CTE_ANY_TABLE_FALLBACK", placeholder_map)]
             if logger is not None:
                 logger.debug(
                     "Trace fallback alias tu SQL text cho column '%s' (alias '%s') -> %s.%s",
@@ -269,23 +427,13 @@ def _resolve_column_rows(
 
     if not ctx.tables and len(ctx.subqueries) == 1:
         nested_target = column.name or column_name
-        subquery_rows = _extract_rows_from_subquery(
+        resolved_rows = _resolve_from_subquery(
             ctx.subqueries[0],
-            placeholder_map,
             nested_target,
-            cte_index=ctx.cte_index,
-            visited=visited,
+            allow_alias_fallback=False,
         )
-        if subquery_rows:
-            if nested_target != column_name:
-                return [
-                    {
-                        **row,
-                        "COLUMN": column_name,
-                    }
-                    for row in subquery_rows
-                ]
-            return subquery_rows
+        if resolved_rows:
+            return resolved_rows
         if _subquery_output_is_derived(ctx.subqueries[0], placeholder_map, nested_target):
             return [_make_row("", "", "dual", column_name, "DERIVED_COLUMN", placeholder_map)]
         single_table = _resolve_single_table_from_subquery(ctx.subqueries[0], cte_index=ctx.cte_index)
@@ -316,7 +464,7 @@ def _resolve_column_rows(
                 return [
                     {
                         **row,
-                        "COLUMN": column_name,
+                        "COLUMN": column_name.upper() if column_name else column_name,
                     }
                     for row in subquery_rows
                 ]
@@ -373,6 +521,27 @@ def _resolve_column_rows(
 
     if allow_text_table and ctx.text_tables:
         schema_name, table_name = ctx.text_tables[0]
+        cte_key = (table_name or "").strip().lower()
+        if cte_key and cte_key in ctx.cte_index:
+            nested_target = column.name or column_name
+            resolved_rows = _resolve_from_subquery(
+                ctx.cte_index[cte_key],
+                nested_target,
+                allow_alias_fallback=False,
+            )
+            if resolved_rows:
+                return resolved_rows
+            single_table = _resolve_single_table_from_subquery(ctx.cte_index[cte_key], cte_index=ctx.cte_index)
+            if single_table is not None:
+                schema_name = single_table.db or single_table.catalog or ""
+                table_name = single_table.name or ""
+                return [_make_row(single_table.catalog or "", schema_name, table_name, column_name, "CTE_SINGLE_TABLE_FALLBACK", placeholder_map)]
+            collected_tables = _collect_tables_from_expression(ctx.cte_index[cte_key], cte_index=ctx.cte_index)
+            if collected_tables:
+                table = collected_tables[0]
+                schema_name = table.db or table.catalog or ""
+                table_name = table.name or ""
+                return [_make_row(table.catalog or "", schema_name, table_name, column_name, "CTE_ANY_TABLE_FALLBACK", placeholder_map)]
         return [_make_row("", schema_name, table_name, column_name, "TEXT_TABLE_FALLBACK", placeholder_map)]
 
     if ctx.has_subquery_source and not ctx.alias_map:
@@ -436,6 +605,16 @@ def _extract_rows_from_select(
                     schema_name = single_table.db or single_table.catalog or ""
                     table_name = single_table.name or ""
                     return [_make_row(single_table.catalog or "", schema_name, table_name, target_column, "STAR_ALIAS_FALLBACK", placeholder_map)]
+    if has_star and ctx.subqueries:
+        star_rows = _extract_rows_from_any_subquery(
+            ctx.subqueries,
+            placeholder_map,
+            target_column,
+            cte_index=ctx.cte_index,
+            visited=visited,
+        )
+        if star_rows:
+            return star_rows
     if has_star and len(ctx.tables) == 1:
         table = ctx.tables[0]
         schema_name = table.db or table.catalog or ""

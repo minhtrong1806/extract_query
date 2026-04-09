@@ -21,11 +21,12 @@ def build_output_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     rows: list[dict[str, str]] = []
     for row in working_df.loc[
         select_mask,
-        ["AST", "SELECT_STATEMENT", "SELECT_STATEMENT_CLEANED"],
+        ["AST", "SELECT_STATEMENT", "SELECT_STATEMENT_CLEANED", "JOB_NAME"],
     ].itertuples(index=False):
         parse_result = row.AST
         raw_sql = row.SELECT_STATEMENT
         cleaned_sql = row.SELECT_STATEMENT_CLEANED
+        job_name = row.JOB_NAME
         if parse_result.ast is None:
             continue
         logger.info("Dang xu ly SELECT_STATEMENT")
@@ -43,9 +44,10 @@ def build_output_dataframe(df: pd.DataFrame) -> pd.DataFrame:
             catalog_name = extracted.get("CATALOG") or ""
             if not schema_name and not table_name:
                 logger.warning(
-                    "Khong suy luan duoc SCHEMA/TABLE cho COLUMN '%s'. Ly do: %s. SQL: %s",
+                    "Khong suy luan duoc SCHEMA/TABLE cho COLUMN '%s'. Ly do: %s. JOB_NAME: %s. SQL: %s",
                     column_name,
                     reason or "UNKNOWN",
+                    job_name,
                     raw_sql,
                 )
             rows.append(
