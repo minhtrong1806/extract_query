@@ -131,6 +131,7 @@ def extract_schema_table_column_rows(
     for column in catalog_columns:
         results.append(
             {
+                "CATALOG": column.get("catalog_name", ""),
                 "SCHEMA": column.get("schema_name", ""),
                 "TABLE": column.get("table_name", ""),
                 "COLUMN": column.get("column_name", ""),

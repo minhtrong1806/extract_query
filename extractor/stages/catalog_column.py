@@ -113,8 +113,9 @@ class CatalogColumnStage:
                                     catalog_columns.append(
                                         {
                                             "block_id": block_id,
+                                            "catalog_name": "",
                                             "schema_name": "",
-                                            "table_name": "DUAL",
+                                            "table_name": "dual",
                                             "column_name": column_name,
                                             "reason": "DERIVED_COLUMN",
                                             "clause_type": clause_type,
@@ -142,6 +143,7 @@ class CatalogColumnStage:
                                     catalog_columns.append(
                                         {
                                             "block_id": block_id,
+                                            "catalog_name": row.get("CATALOG", ""),
                                             "schema_name": row.get("SCHEMA", ""),
                                             "table_name": row.get("TABLE", ""),
                                             "column_name": column_name,
@@ -163,6 +165,7 @@ class CatalogColumnStage:
                             catalog_columns.append(
                                 {
                                     "block_id": block_id,
+                                    "catalog_name": row.get("CATALOG", ""),
                                     "schema_name": row.get("SCHEMA", ""),
                                     "table_name": row.get("TABLE", ""),
                                     "column_name": row.get("COLUMN", ""),

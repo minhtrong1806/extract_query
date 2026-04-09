@@ -37,6 +37,7 @@ def build_output_dataframe(df: pd.DataFrame) -> pd.DataFrame:
             column_name = extracted["COLUMN"]
             reason = extracted.get("REASON") or ""
             clause = extracted.get("CLAUSE") or ""
+            catalog_name = extracted.get("CATALOG") or ""
             if not schema_name and not table_name:
                 logger.warning(
                     "Khong suy luan duoc SCHEMA/TABLE cho COLUMN '%s'. Ly do: %s. SQL: %s",
@@ -46,6 +47,7 @@ def build_output_dataframe(df: pd.DataFrame) -> pd.DataFrame:
                 )
             rows.append(
                 {
+                    "CATALOG": catalog_name,
                     "SCHEMA": schema_name,
                     "TABLE": table_name,
                     "COLUMN": column_name,
@@ -56,12 +58,12 @@ def build_output_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
     output_df = pd.DataFrame(
         rows,
-        columns=["SCHEMA", "TABLE", "COLUMN", "CLAUSE", "SELECT_STATEMENT"],
+        columns=["CATALOG", "SCHEMA", "TABLE", "COLUMN", "CLAUSE", "SELECT_STATEMENT"],
     )
     if output_df.empty:
         return output_df
     return output_df.sort_values(
-        by=["SCHEMA", "TABLE", "COLUMN"],
+        by=["CATALOG", "SCHEMA", "TABLE", "COLUMN"],
         ascending=[True, True, True],
         kind="mergesort",
         na_position="last",

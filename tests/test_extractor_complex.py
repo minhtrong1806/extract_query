@@ -20,9 +20,10 @@ def _extract_rows(sql: str, sql_text: str | None = None) -> List[dict[str, str]]
     )
 
 
-def _as_set(rows: List[dict[str, str]]) -> set[Tuple[str, str, str, str, str]]:
+def _as_set(rows: List[dict[str, str]]) -> set[Tuple[str, str, str, str, str, str]]:
     return {
         (
+            row.get("CATALOG", ""),
             row.get("SCHEMA", ""),
             row.get("TABLE", ""),
             row.get("COLUMN", ""),
@@ -42,8 +43,8 @@ def test_join_with_alias_and_schema():
     """
     rows = _extract_rows(sql)
     row_set = _as_set(rows)
-    assert ("sch1", "table1", "col1", "", "PROJECTION") in row_set
-    assert ("", "table2", "col2", "", "PROJECTION") in row_set
+    assert ("", "sch1", "table1", "col1", "", "PROJECTION") in row_set
+    assert ("", "", "table2", "col2", "", "PROJECTION") in row_set
 
 
 def test_cte_resolves_to_base_table():
@@ -58,7 +59,7 @@ def test_cte_resolves_to_base_table():
     """
     rows = _extract_rows(sql)
     row_set = _as_set(rows)
-    assert ("sch2", "t_users", "id", "", "PROJECTION") in row_set
+    assert ("", "sch2", "t_users", "id", "", "PROJECTION") in row_set
 
 
 def test_union_subquery_returns_multiple_sources():
@@ -73,8 +74,8 @@ def test_union_subquery_returns_multiple_sources():
     """
     rows = _extract_rows(sql)
     row_set = _as_set(rows)
-    assert ("", "t_a", "col1", "", "PROJECTION") in row_set
-    assert ("", "t_b", "col1", "", "PROJECTION") in row_set
+    assert ("", "", "t_a", "col1", "", "PROJECTION") in row_set
+    assert ("", "", "t_b", "col1", "", "PROJECTION") in row_set
 
 
 def test_star_alias_fallback_for_unqualified_column():
@@ -82,7 +83,7 @@ def test_star_alias_fallback_for_unqualified_column():
     sql = "SELECT a.*, col1 FROM sch.star_table a"
     rows = _extract_rows(sql)
     row_set = _as_set(rows)
-    assert ("sch", "star_table", "col1", "", "PROJECTION") in row_set
+    assert ("", "sch", "star_table", "col1", "", "PROJECTION") in row_set
 
 
 def test_quoted_identifiers_schema_table():
@@ -90,7 +91,7 @@ def test_quoted_identifiers_schema_table():
     sql = 'SELECT t.col FROM "MYSCHEMA"."MYTABLE" t'
     rows = _extract_rows(sql)
     row_set = _as_set(rows)
-    assert ("MYSCHEMA", "MYTABLE", "col", "", "PROJECTION") in row_set
+    assert ("", "MYSCHEMA", "MYTABLE", "col", "", "PROJECTION") in row_set
 
 
 def test_first_table_fallback_for_unqualified_column():
@@ -98,7 +99,7 @@ def test_first_table_fallback_for_unqualified_column():
     sql = "SELECT col1 FROM t1 JOIN t2 ON t1.id = t2.id"
     rows = _extract_rows(sql)
     row_set = _as_set(rows)
-    assert ("", "t1", "col1", "FIRST_TABLE_FALLBACK", "PROJECTION") in row_set
+    assert ("", "", "t1", "col1", "FIRST_TABLE_FALLBACK", "PROJECTION") in row_set
 
 
 def test_subquery_any_table_fallback_for_ambiguous_subquery():
@@ -113,7 +114,7 @@ def test_subquery_any_table_fallback_for_ambiguous_subquery():
     """
     rows = _extract_rows(sql)
     row_set = _as_set(rows)
-    assert ("", "t1", "col1", "SUBQUERY_ANY_TABLE_FALLBACK", "PROJECTION") in row_set
+    assert ("", "", "t1", "col1", "SUBQUERY_ANY_TABLE_FALLBACK", "PROJECTION") in row_set
 
 
 def test_subquery_unresolved_reason():
@@ -121,7 +122,7 @@ def test_subquery_unresolved_reason():
     sql = "SELECT col1 FROM (SELECT 1 AS x) s"
     rows = _extract_rows(sql)
     row_set = _as_set(rows)
-    assert ("", "", "col1", "SUBQUERY_SOURCE_ONLY", "PROJECTION") in row_set
+    assert ("", "", "", "col1", "SUBQUERY_SOURCE_ONLY", "PROJECTION") in row_set
 
 
 def test_unresolved_table_reason_for_unknown_alias():
@@ -129,7 +130,7 @@ def test_unresolved_table_reason_for_unknown_alias():
     sql = "SELECT x.col1 FROM t1 JOIN t2 ON t1.id = t2.id"
     rows = _extract_rows(sql, sql_text="")
     row_set = _as_set(rows)
-    assert ("", "", "col1", "UNRESOLVED_TABLE", "PROJECTION") in row_set
+    assert ("", "", "", "col1", "UNRESOLVED_TABLE", "PROJECTION") in row_set
 
 
 def test_subquery_join_resolves_nested_column_alias():
@@ -145,7 +146,7 @@ def test_subquery_join_resolves_nested_column_alias():
     """
     rows = _extract_rows(sql)
     row_set = _as_set(rows)
-    assert ("", "base_table", "verify_decision", "", "PROJECTION") in row_set
+    assert ("", "", "base_table", "verify_decision", "", "PROJECTION") in row_set
 
 
 def test_cte_resolves_column_via_joined_subquery():
@@ -161,7 +162,7 @@ def test_cte_resolves_column_via_joined_subquery():
     """
     rows = _extract_rows(sql)
     row_set = _as_set(rows)
-    assert ("", "base_table", "code", "", "PROJECTION") in row_set
+    assert ("", "", "base_table", "code", "", "PROJECTION") in row_set
 
 
 def test_cte_union_all_resolves_base_tables_for_column():
@@ -196,8 +197,8 @@ def test_cte_union_all_resolves_base_tables_for_column():
     """
     rows = _extract_rows(sql)
     row_set = _as_set(rows)
-    assert ("KMDW", "FT_SV_CC_TRANS", "CUST_NUMBER", "", "PROJECTION") in row_set
-    assert ("KMDW", "FT_SV_DC_TRANS", "CUST_NUMBER", "", "PROJECTION") in row_set
+    assert ("", "KMDW", "FT_SV_CC_TRANS", "CUST_NUMBER", "", "PROJECTION") in row_set
+    assert ("", "KMDW", "FT_SV_DC_TRANS", "CUST_NUMBER", "", "PROJECTION") in row_set
 
 
 def test_complex_cte_chain_resolves_cust_number():
@@ -256,8 +257,8 @@ def test_complex_cte_chain_resolves_cust_number():
     """
     rows = _extract_rows(sql)
     row_set = _as_set(rows)
-    assert ("KMDW", "FT_SV_CC_TRANS", "CUST_NUMBER", "", "PROJECTION") in row_set
-    assert ("KMDW", "FT_SV_DC_TRANS", "CUST_NUMBER", "", "PROJECTION") in row_set
+    assert ("", "KMDW", "FT_SV_CC_TRANS", "CUST_NUMBER", "", "PROJECTION") in row_set
+    assert ("", "KMDW", "FT_SV_DC_TRANS", "CUST_NUMBER", "", "PROJECTION") in row_set
 
 
 def test_derived_column_from_cte_chain_returns_derived_table():
@@ -280,4 +281,4 @@ def test_derived_column_from_cte_chain_returns_derived_table():
     """
     rows = _extract_rows(sql)
     row_set = _as_set(rows)
-    assert ("", "dual", "STATUS", "DERIVED_COLUMN", "PROJECTION") in row_set
+    assert ("", "", "dual", "STATUS", "DERIVED_COLUMN", "PROJECTION") in row_set
