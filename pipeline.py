@@ -64,7 +64,7 @@ def build_output_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         return output_df
     return output_df.sort_values(
         by=["CATALOG", "SCHEMA", "TABLE", "COLUMN"],
-        ascending=[True, True, True],
+        ascending=[True, True, True, True],
         kind="mergesort",
         na_position="last",
     ).reset_index(drop=True)
