@@ -25,10 +25,10 @@ def _mask_placeholders(statement: str) -> Tuple[str, Dict[str, str]]:
 def parse_select_statement(statement: object) -> ParseResult:
     """Parse câu lệnh SQL SELECT và trả về ParseResult.
 
-    Args:
+    Tham số:
         statement: Giá trị câu lệnh thô (kỳ vọng là chuỗi).
 
-    Returns:
+    Trả về:
         ParseResult gồm AST, placeholder_map và lỗi parse (nếu có).
     """
     if not isinstance(statement, str) or not statement.strip():

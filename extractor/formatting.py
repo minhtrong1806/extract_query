@@ -4,8 +4,6 @@ from typing import Dict, Iterable, List
 
 from sqlglot import expressions as exp
 
-from ast_utils import iter_selects, iter_tables
-
 
 def _dedup_preserve_order(items: Iterable[str]) -> List[str]:
     seen = set()
@@ -119,47 +117,8 @@ def _format_where_sql(
     return _expression_sql(expression, placeholder_map, dialect=dialect)
 
 
-def extract_column_list(ast: exp.Expression, placeholder_map: Dict[str, str]) -> str:
-    """Trích xuất danh sách cột trong SELECT (projection)."""
-    columns: List[str] = []
-    for select in iter_selects(ast):
-        for expression in select.expressions or []:
-            if _is_star(expression):
-                columns.append(_expression_sql(expression, placeholder_map, dialect="oracle"))
-                continue
-            name = _output_name(expression, placeholder_map)
-            if name:
-                columns.append(name)
-    return ", ".join(_dedup_preserve_order(columns))
-
-
-def extract_table_list(ast: exp.Expression, placeholder_map: Dict[str, str]) -> str:
-    """Trích xuất danh sách bảng xuất hiện trong câu lệnh."""
-    tables: List[str] = []
-    for table in iter_tables(ast):
-        name = _format_table_name(table)
-        if name:
-            tables.append(name)
-    return ", ".join(_dedup_preserve_order(tables))
-
-
-def extract_where_list(ast: exp.Expression, placeholder_map: Dict[str, str]) -> str:
-    """Trích xuất danh sách điều kiện WHERE dưới dạng SQL thuần."""
-    wheres: List[str] = []
-    for select in iter_selects(ast):
-        where = select.args.get("where")
-        if isinstance(where, exp.Where) and where.this is not None:
-            sql = _format_where_sql(where.this, placeholder_map, dialect="oracle")
-            if sql:
-                wheres.append(sql)
-    return " | ".join(_dedup_preserve_order(wheres))
-
-
-def extract_schema_list(ast: exp.Expression, placeholder_map: Dict[str, str]) -> str:
-    """Trích xuất danh sách schema từ các bảng xuất hiện trong câu lệnh."""
-    schemas: List[str] = []
-    for table in iter_tables(ast):
-        schema_name = table.db or table.catalog
-        if schema_name:
-            schemas.append(schema_name)
-    return ", ".join(_dedup_preserve_order(schemas))
+def _column_output_name(column: exp.Column, placeholder_map: Dict[str, str]) -> str:
+    if bool(getattr(column, "is_star", False)):
+        return "*"
+    name = column.name or column.sql(pretty=False)
+    return _restore_placeholders(name, placeholder_map)

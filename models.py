@@ -10,7 +10,7 @@ from sqlglot import expressions as exp
 class ParseResult:
     """Kết quả parse một câu lệnh SQL SELECT.
 
-    Attributes:
+    Thuộc tính:
         ast: AST đã parse hoặc None nếu parse thất bại.
         placeholder_map: Ánh xạ placeholder đã mask về token gốc.
         error: Thông báo lỗi khi parse thất bại, ngược lại là None.
