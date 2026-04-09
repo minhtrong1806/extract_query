@@ -151,8 +151,19 @@ def _resolve_column_rows(
     placeholder_map: Dict[str, str],
     column_name: str,
     logger=None,
+    strict_unqualified: bool = False,
+    policy: Dict[str, bool] | None = None,
     visited: set[tuple[int, str]] | None = None,
 ) -> List[dict[str, str]]:
+    policy = policy or {}
+    allow_text_alias = policy.get("allow_text_alias", True)
+    allow_text_table = policy.get("allow_text_table", True)
+    allow_first_table = policy.get("allow_first_table", True)
+    allow_table_plus_subquery = policy.get("allow_table_plus_subquery", True)
+
+    if strict_unqualified and not (column.table or "").strip():
+        return [_make_row("", "", column_name, "UNRESOLVED_TABLE", placeholder_map)]
+
     resolved_table = _resolve_table_for_column(column, ctx.alias_map, ctx.tables)
     if resolved_table is not None:
         schema_name = resolved_table.db or resolved_table.catalog or ""
@@ -186,30 +197,60 @@ def _resolve_column_rows(
                 ]
             return subquery_rows
         if _subquery_output_is_derived(resolved_subquery, placeholder_map, nested_target):
-            return [_make_row("", "__DERIVED__", column_name, "DERIVED_COLUMN", placeholder_map)]
+            return [_make_row("", "DUAL", column_name, "DERIVED_COLUMN", placeholder_map)]
         single_table = _resolve_single_table_from_subquery(resolved_subquery, cte_index=ctx.cte_index)
         if single_table is not None:
             schema_name = single_table.db or single_table.catalog or ""
             table_name = single_table.name or ""
             return [_make_row(schema_name, table_name, column_name, "", placeholder_map)]
         if _subquery_has_output(resolved_subquery, placeholder_map, nested_target):
-            return [_make_row("", "__DERIVED__", column_name, "DERIVED_COLUMN", placeholder_map)]
+            return [_make_row("", "DUAL", column_name, "DERIVED_COLUMN", placeholder_map)]
         alias_name = (column.table or "").strip()
         if alias_name:
             return [_make_row("", alias_name, column_name, "SUBQUERY_ALIAS_FALLBACK", placeholder_map)]
 
-    text_resolution = _resolve_table_from_text_alias(column, ctx.text_alias_map, ctx.text_tables)
-    if text_resolution is not None:
-        schema_name, table_name = text_resolution
-        if logger is not None:
-            logger.debug(
-                "Trace fallback alias tu SQL text cho column '%s' (alias '%s') -> %s.%s",
-                column_name,
-                (column.table or "").strip(),
-                schema_name,
-                table_name,
+    if allow_table_plus_subquery and not (column.table or "").strip():
+        if len(ctx.tables) == 1 and len(ctx.subqueries) == 1:
+            nested_target = column.name or column_name
+            subquery_rows = _extract_rows_from_subquery(
+                ctx.subqueries[0],
+                placeholder_map,
+                nested_target,
+                cte_index=ctx.cte_index,
+                visited=visited,
             )
-        return [_make_row(schema_name, table_name, column_name, "TEXT_ALIAS_FALLBACK", placeholder_map)]
+            if subquery_rows:
+                if nested_target != column_name:
+                    return [
+                        {
+                            **row,
+                            "COLUMN": column_name,
+                        }
+                        for row in subquery_rows
+                    ]
+                return subquery_rows
+            if _subquery_output_is_derived(ctx.subqueries[0], placeholder_map, nested_target):
+                return [_make_row("", "DUAL", column_name, "DERIVED_COLUMN", placeholder_map)]
+            if _subquery_has_output(ctx.subqueries[0], placeholder_map, nested_target):
+                return [_make_row("", "DUAL", column_name, "DERIVED_COLUMN", placeholder_map)]
+            only_table = ctx.tables[0]
+            schema_name = only_table.db or only_table.catalog or ""
+            table_name = only_table.name or ""
+            return [_make_row(schema_name, table_name, column_name, "", placeholder_map)]
+
+    if allow_text_alias:
+        text_resolution = _resolve_table_from_text_alias(column, ctx.text_alias_map, ctx.text_tables)
+        if text_resolution is not None:
+            schema_name, table_name = text_resolution
+            if logger is not None:
+                logger.debug(
+                    "Trace fallback alias tu SQL text cho column '%s' (alias '%s') -> %s.%s",
+                    column_name,
+                    (column.table or "").strip(),
+                    schema_name,
+                    table_name,
+                )
+            return [_make_row(schema_name, table_name, column_name, "TEXT_ALIAS_FALLBACK", placeholder_map)]
 
     if logger is not None:
         from .context import _summarize_alias_map, _summarize_subquery_aliases, _summarize_tables
@@ -244,14 +285,14 @@ def _resolve_column_rows(
                 ]
             return subquery_rows
         if _subquery_output_is_derived(ctx.subqueries[0], placeholder_map, nested_target):
-            return [_make_row("", "__DERIVED__", column_name, "DERIVED_COLUMN", placeholder_map)]
+            return [_make_row("", "DUAL", column_name, "DERIVED_COLUMN", placeholder_map)]
         single_table = _resolve_single_table_from_subquery(ctx.subqueries[0], cte_index=ctx.cte_index)
         if single_table is not None:
             schema_name = single_table.db or single_table.catalog or ""
             table_name = single_table.name or ""
             return [_make_row(schema_name, table_name, column_name, "", placeholder_map)]
         if _subquery_has_output(ctx.subqueries[0], placeholder_map, nested_target):
-            return [_make_row("", "__DERIVED__", column_name, "DERIVED_COLUMN", placeholder_map)]
+            return [_make_row("", "DUAL", column_name, "DERIVED_COLUMN", placeholder_map)]
         collected_tables = _collect_tables_from_expression(ctx.subqueries[0], cte_index=ctx.cte_index)
         if collected_tables:
             table = collected_tables[0]
@@ -322,13 +363,13 @@ def _resolve_column_rows(
                     table_name = single_table.name or ""
                     return [_make_row(schema_name, table_name, column_name, "STAR_ALIAS_FALLBACK", placeholder_map)]
 
-    if not column.table and ctx.tables:
+    if allow_first_table and not column.table and ctx.tables:
         primary = ctx.tables[0]
         schema_name = primary.db or primary.catalog or ""
         table_name = primary.name or ""
         return [_make_row(schema_name, table_name, column_name, "FIRST_TABLE_FALLBACK", placeholder_map)]
 
-    if ctx.text_tables:
+    if allow_text_table and ctx.text_tables:
         schema_name, table_name = ctx.text_tables[0]
         return [_make_row(schema_name, table_name, column_name, "TEXT_TABLE_FALLBACK", placeholder_map)]
 

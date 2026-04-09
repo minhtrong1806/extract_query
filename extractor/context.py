@@ -387,12 +387,19 @@ def _resolve_table_from_text_alias(
 def _collect_tables_from_expression(
     node: exp.Expression,
     cte_index: Dict[str, exp.Expression] | None = None,
+    visited: set[int] | None = None,
 ) -> List[exp.Table]:
+    if visited is None:
+        visited = set()
+    node_id = id(node)
+    if node_id in visited:
+        return []
+    visited.add(node_id)
     if isinstance(node, exp.Subquery) and isinstance(node.this, exp.Expression):
-        return _collect_tables_from_expression(node.this, cte_index)
+        return _collect_tables_from_expression(node.this, cte_index, visited)
     if isinstance(node, exp.SetOperation):
-        left_tables = _collect_tables_from_expression(node.this, cte_index)
-        right_tables = _collect_tables_from_expression(node.expression, cte_index)
+        left_tables = _collect_tables_from_expression(node.this, cte_index, visited)
+        right_tables = _collect_tables_from_expression(node.expression, cte_index, visited)
         merged: List[exp.Table] = []
         seen = set()
         for table in left_tables + right_tables:
@@ -420,14 +427,14 @@ def _collect_tables_from_expression(
         if isinstance(source, exp.Table) and source.name:
             cte_name = source.name.strip().lower()
             if cte_name in cte_index:
-                nested = _collect_tables_from_expression(cte_index[cte_name], cte_index)
+                nested = _collect_tables_from_expression(cte_index[cte_name], cte_index, visited)
                 for table in nested:
                     _add_table(table)
             else:
                 _add_table(source)
             continue
         if isinstance(source, exp.Subquery) and isinstance(source.this, exp.Expression):
-            nested = _collect_tables_from_expression(source.this, cte_index)
+            nested = _collect_tables_from_expression(source.this, cte_index, visited)
             for table in nested:
                 _add_table(table)
     return collected

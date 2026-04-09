@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from typing import Dict, List
 
+import json
 import logging
+import os
 
 from sqlglot import expressions as exp
 
@@ -20,8 +22,18 @@ from .formatting import (
 )
 from .resolvers import _extract_rows_from_select as _resolve_rows_from_select
 from .resolvers import _resolve_column_rows
+from .stages import CatalogColumnStage, CatalogTableStage, QueryBlockStage
 
 logger = logging.getLogger(__name__)
+
+
+def _write_jsonl(file_path: str, records: List[dict]) -> None:
+    if not records:
+        return
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    with open(file_path, "a", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 def extract_column_list(ast: exp.Expression, placeholder_map: Dict[str, str]) -> str:
@@ -86,20 +98,45 @@ def extract_schema_table_column_rows(
     """Trích xuất danh sách dòng (SCHEMA, TABLE, COLUMN) theo từng cột.
 
     Trả về:
-        Danh sách dict gồm SCHEMA/TABLE/COLUMN và lý do nếu không suy luận được.
+        Danh sách dict gồm SCHEMA/TABLE/COLUMN/CLAUSE và lý do nếu không suy luận được.
     """
     results: List[dict[str, str]] = []
     global_cte_index = build_global_cte_index(ast)
-    for select in iter_selects(ast):
-        ctx = build_select_context(select, sql_text=sql_text, inherited_cte_index=global_cte_index)
-        for expression in select.expressions or []:
-            for column in iter_columns(expression):
-                if not isinstance(column, exp.Column):
-                    continue
-                if column.parent_select is not select:
-                    continue
-                if bool(getattr(column, "is_star", False)):
-                    continue
-                column_name = _column_output_name(column, placeholder_map)
-                results.extend(_resolve_column_rows(ctx, column, placeholder_map, column_name, logger=logger))
+
+    query_block_stage = QueryBlockStage()
+    query_blocks, node_to_block = query_block_stage.run(ast, placeholder_map)
+
+    catalog_table_stage = CatalogTableStage()
+    catalog_tables, select_context_by_block = catalog_table_stage.run(
+        ast,
+        node_to_block,
+        placeholder_map,
+        sql_text,
+        global_cte_index,
+    )
+
+    catalog_column_stage = CatalogColumnStage()
+    catalog_columns = catalog_column_stage.run(
+        ast,
+        node_to_block,
+        select_context_by_block,
+        placeholder_map,
+    )
+
+    base_output_dir = os.path.join(os.getcwd(), "output", "temp")
+    _write_jsonl(os.path.join(base_output_dir, "query_blocks.jsonl"), query_blocks)
+    _write_jsonl(os.path.join(base_output_dir, "catalog_tables.jsonl"), catalog_tables)
+    _write_jsonl(os.path.join(base_output_dir, "catalog_columns.jsonl"), catalog_columns)
+
+    for column in catalog_columns:
+        results.append(
+            {
+                "SCHEMA": column.get("schema_name", ""),
+                "TABLE": column.get("table_name", ""),
+                "COLUMN": column.get("column_name", ""),
+                "REASON": column.get("reason", ""),
+                "CLAUSE": column.get("clause_type", ""),
+            }
+        )
+
     return results
