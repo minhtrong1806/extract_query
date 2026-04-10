@@ -28,6 +28,178 @@ from logger import get_logger
 logger = get_logger(__name__, log_to_file=True, log_dir="./logs")
 
 
+def _split_and_predicates(expression: exp.Expression) -> List[exp.Expression]:
+    if isinstance(expression, exp.And):
+        left = expression.this
+        right = expression.expression
+        parts: List[exp.Expression] = []
+        if isinstance(left, exp.Expression):
+            parts.extend(_split_and_predicates(left))
+        if isinstance(right, exp.Expression):
+            parts.extend(_split_and_predicates(right))
+        return parts
+    return [expression]
+
+
+def _table_key(catalog_name: str, schema_name: str, table_name: str) -> tuple[str, str, str]:
+    return (catalog_name.upper(), schema_name.upper(), table_name.upper())
+
+
+def _pick_physical_row(rows: List[dict[str, str]]) -> dict[str, str] | None:
+    for row in rows:
+        table_name = (row.get("TABLE") or "").strip()
+        if not table_name:
+            continue
+        if table_name.upper() == "DUAL":
+            continue
+        return row
+    return None
+
+
+def _should_resolve_condition_column(column: exp.Column, column_name: str) -> bool:
+    if not (column.table or "").strip():
+        return False
+    return not column_name.upper().startswith("V_")
+
+
+def _normalize_predicate_with_resolved_tables(
+    predicate: exp.Expression,
+    ctx: Any,
+    placeholder_map: Dict[str, str],
+    policy: Dict[str, bool],
+) -> exp.Expression:
+    def _transform(node: exp.Expression) -> exp.Expression:
+        if not isinstance(node, exp.Column):
+            return node
+        if bool(getattr(node, "is_star", False)):
+            return node
+
+        column_name = _column_output_name(node, placeholder_map)
+        if not _should_resolve_condition_column(node, column_name):
+            return node
+
+        rows = _resolve_column_rows(
+            ctx,
+            node,
+            placeholder_map,
+            column_name,
+            policy=policy,
+        )
+        chosen = _pick_physical_row(rows)
+        if not chosen:
+            return node
+
+        table_name = (chosen.get("TABLE") or "").strip()
+        if not table_name:
+            return node
+
+        return exp.Column(
+            this=exp.to_identifier(node.name or column_name),
+            table=exp.to_identifier(table_name),
+        )
+
+    return predicate.copy().transform(_transform)
+
+
+def _build_where_condition_map(
+    ast: exp.Expression,
+    node_to_block: Dict[int, int],
+    select_context_by_block: Dict[int, Any],
+    placeholder_map: Dict[str, str],
+) -> Dict[int, Dict[tuple[str, str, str], str]]:
+    policy = {
+        "allow_text_alias": True,
+        "allow_text_table": True,
+        "allow_first_table": True,
+        "allow_table_plus_subquery": True,
+    }
+
+    temp_map: Dict[int, Dict[tuple[str, str, str], List[str]]] = {}
+
+    for select in iter_selects(ast):
+        block_id = node_to_block.get(id(select))
+        if block_id is None:
+            continue
+        ctx = select_context_by_block.get(block_id)
+        if ctx is None:
+            continue
+
+        predicates: List[exp.Expression] = []
+
+        where = select.args.get("where")
+        if isinstance(where, exp.Where) and isinstance(where.this, exp.Expression):
+            predicates.extend(_split_and_predicates(where.this))
+
+        joins = select.args.get("joins") or []
+        for join in joins:
+            if not isinstance(join, exp.Join):
+                continue
+            join_on = join.args.get("on")
+            if isinstance(join_on, exp.Expression):
+                predicates.extend(_split_and_predicates(join_on))
+
+        for predicate in predicates:
+            normalized_predicate = _normalize_predicate_with_resolved_tables(
+                predicate,
+                ctx,
+                placeholder_map,
+                policy,
+            )
+            predicate_sql = _format_where_sql(normalized_predicate, placeholder_map, dialect="oracle")
+            if not predicate_sql:
+                continue
+
+            table_keys: set[tuple[str, str, str]] = set()
+            for column in iter_columns(predicate):
+                if not isinstance(column, exp.Column):
+                    continue
+                if column.parent_select is not select:
+                    continue
+                if bool(getattr(column, "is_star", False)):
+                    continue
+
+                column_name = _column_output_name(column, placeholder_map)
+                if not _should_resolve_condition_column(column, column_name):
+                    continue
+                rows = _resolve_column_rows(
+                    ctx,
+                    column,
+                    placeholder_map,
+                    column_name,
+                    policy=policy,
+                )
+                for row in rows:
+                    table_name = row.get("TABLE", "")
+                    if not table_name:
+                        continue
+                    if table_name.upper() == "DUAL":
+                        continue
+                    table_keys.add(
+                        _table_key(
+                            row.get("CATALOG", ""),
+                            row.get("SCHEMA", ""),
+                            table_name,
+                        )
+                    )
+
+            if not table_keys:
+                continue
+
+            block_bucket = temp_map.setdefault(block_id, {})
+            for key in table_keys:
+                conditions = block_bucket.setdefault(key, [])
+                if predicate_sql not in conditions:
+                    conditions.append(predicate_sql)
+
+    result: Dict[int, Dict[tuple[str, str, str], str]] = {}
+    for block_id, table_conditions in temp_map.items():
+        result[block_id] = {
+            key: " AND ".join(values)
+            for key, values in table_conditions.items()
+        }
+    return result
+
+
 def _write_jsonl(file_path: str, records: List[dict]) -> None:
     if not records:
         return
@@ -129,6 +301,13 @@ def extract_schema_table_column_rows(
     )
     logger.info("CatalogColumnStage hoan tat: %s columns", len(catalog_columns))
 
+    where_condition_map = _build_where_condition_map(
+        ast,
+        node_to_block,
+        select_context_by_block,
+        placeholder_map,
+    )
+
     base_output_dir = os.path.join(os.getcwd(), "output", "temp")
     _write_jsonl(os.path.join(base_output_dir, "query_blocks.jsonl"), query_blocks)
     _write_jsonl(os.path.join(base_output_dir, "catalog_tables.jsonl"), catalog_tables)
@@ -136,6 +315,16 @@ def extract_schema_table_column_rows(
     logger.info("Da ghi stage output vao %s", base_output_dir)
 
     for column in catalog_columns:
+        block_id = column.get("block_id")
+        table_key = _table_key(
+            column.get("catalog_name", ""),
+            column.get("schema_name", ""),
+            column.get("table_name", ""),
+        )
+        where_condition = ""
+        if isinstance(block_id, int):
+            where_condition = where_condition_map.get(block_id, {}).get(table_key, "")
+
         results.append(
             {
                 "CATALOG": column.get("catalog_name", ""),
@@ -144,6 +333,7 @@ def extract_schema_table_column_rows(
                 "COLUMN": column.get("column_name", ""),
                 "REASON": column.get("reason", ""),
                 "CLAUSE": column.get("clause_type", ""),
+                "WHERE_CONDITION": where_condition,
             }
         )
 

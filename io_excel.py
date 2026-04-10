@@ -87,9 +87,9 @@ def read_excel_data(file_path: str | Path, sheet_name: str = "Sheet1") -> pd.Dat
         .str.replace(r"[\t ]+", " ", regex=True)
         .str.strip()
     )
-    df["SELECT_STATEMENT_CLEANED"] = df["SELECT_STATEMENT_CLEANED"].apply(
-        _convert_inline_comments_to_block
-    )
+    # df["SELECT_STATEMENT_CLEANED"] = df["SELECT_STATEMENT_CLEANED"].apply(
+    #     _convert_inline_comments_to_block
+    # )
     return df
 
 

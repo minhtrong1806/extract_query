@@ -58,7 +58,7 @@ def _format_table_name(table: exp.Table) -> str | None:
     if not isinstance(table, exp.Table) or not table.name:
         return None
     # parts = [table.catalog, table.db, table.name]
-    parts = [table.name]
+    parts = [table.db or table.catalog, table.name]
     return ".".join([part for part in parts if part])
 
 

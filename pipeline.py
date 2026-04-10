@@ -11,6 +11,15 @@ from logger import get_logger
 logger = get_logger(__name__, log_to_file=True, log_dir="./logs")
 
 
+def _normalize_table_only(table_name: str) -> str:
+    table = (table_name or "").strip()
+    if not table:
+        return table
+    if "." in table:
+        return table.split(".")[-1].strip()
+    return table
+
+
 def build_output_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     """Tạo DataFrame đầu ra theo từng cột với SCHEMA/TABLE/COLUMN."""
     logger.info("Bat dau build_output_dataframe: %s dong", len(df))
@@ -28,6 +37,12 @@ def build_output_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         cleaned_sql = row.SELECT_STATEMENT_CLEANED
         job_name = row.JOB_NAME
         if parse_result.ast is None:
+            logger.warning(
+                "Khong parse duoc SELECT_STATEMENT. Loi: %s. JOB_NAME: %s. SQL: %s",
+                parse_result.error or "UNKNOWN",
+                job_name,
+                raw_sql,
+            )
             continue
         logger.info("Dang xu ly SELECT_STATEMENT")
         extracted_rows = extract_schema_table_column_rows(
@@ -38,10 +53,14 @@ def build_output_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         for extracted in extracted_rows:
             schema_name = extracted["SCHEMA"]
             table_name = extracted["TABLE"]
+            table_name = _normalize_table_only(table_name)
             column_name = extracted["COLUMN"]
+            if isinstance(column_name, str) and column_name.upper().startswith("V_"):
+                continue
             reason = extracted.get("REASON") or ""
             clause = extracted.get("CLAUSE") or ""
             catalog_name = extracted.get("CATALOG") or ""
+            where_condition = extracted.get("WHERE_CONDITION") or ""
             if not schema_name and not table_name:
                 logger.warning(
                     "Khong suy luan duoc SCHEMA/TABLE cho COLUMN '%s'. Ly do: %s. JOB_NAME: %s. SQL: %s",
@@ -52,10 +71,11 @@ def build_output_dataframe(df: pd.DataFrame) -> pd.DataFrame:
                 )
             rows.append(
                 {
-                    "CATALOG": catalog_name,
+                    "COLUMN": column_name,
                     "SCHEMA": schema_name,
                     "TABLE": table_name,
-                    "COLUMN": column_name,
+                    "WHERE_CONDITION": where_condition,
+                    "CATALOG": catalog_name,
                     "CLAUSE": clause,
                     "SELECT_STATEMENT": raw_sql or cleaned_sql or "",
                 }
@@ -63,7 +83,7 @@ def build_output_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
     output_df = pd.DataFrame(
         rows,
-        columns=["CATALOG", "SCHEMA", "TABLE", "COLUMN", "CLAUSE", "SELECT_STATEMENT"],
+        columns=["COLUMN", "SCHEMA", "TABLE", "WHERE_CONDITION", "CATALOG", "CLAUSE", "SELECT_STATEMENT"],
     )
     if output_df.empty:
         logger.warning("Output rong sau khi trich xuat")
