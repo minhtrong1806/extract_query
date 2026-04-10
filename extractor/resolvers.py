@@ -590,8 +590,8 @@ def _extract_rows_from_select(
             if bool(getattr(column, "is_star", False)):
                 has_star = True
                 continue
-
-            rows = _resolve_column_rows(ctx, column, placeholder_map, target_column, visited=visited)
+            source_column_name = _restore_placeholders(column.name or target_column, placeholder_map)
+            rows = _resolve_column_rows(ctx, column, placeholder_map, source_column_name, visited=visited)
             if rows:
                 resolved_rows.extend(rows)
     if resolved_rows:

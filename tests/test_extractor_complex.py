@@ -438,3 +438,51 @@ def test_placeholder_column_resolves_to_dual():
     rows = _extract_rows(sql)
     row_set = _as_set(rows)
     assert ("", "", "DUAL", "#PDATE#", "PLACEHOLDER_COLUMN", "PROJECTION") in row_set
+
+
+def test_where_condition_resolves_correlated_column_to_base_table():
+    """WHERE_CONDITION resolve được alias ngoài về bảng gốc, không tạo self-join vô nghĩa."""
+    sql = """
+        SELECT A.ACTUAL_BALANCE
+        FROM FT_GL_BALANCE_SBV A
+        WHERE EXISTS (
+            SELECT 1
+            FROM KMDW.DM_BRANCH B
+            WHERE A.BRANCH_NO = B.BRANCH_NO
+        )
+    """
+    rows = _extract_rows(sql)
+    target_rows = [
+        row
+        for row in rows
+        if row.get("TABLE", "").upper() == "FT_GL_BALANCE_SBV"
+        and row.get("COLUMN", "").upper() == "ACTUAL_BALANCE"
+    ]
+    assert target_rows
+    where_texts = [str(row.get("WHERE_CONDITION", "")).upper() for row in target_rows]
+    assert any("FT_GL_BALANCE_SBV.BRANCH_NO = B.BRANCH_NO" in text for text in where_texts)
+    assert all("DM_BRANCH.BRANCH_NO = DM_BRANCH.BRANCH_NO" not in text for text in where_texts)
+
+
+def test_where_condition_resolves_subquery_alias_to_base_table():
+    """Điều kiện JOIN ngoài resolve được alias subquery về bảng vật lý nguồn."""
+    sql = """
+        SELECT TRIAL_BAL.GL_CODE
+        FROM (
+            SELECT A.GL_CODE
+            FROM FT_GL_BALANCE_SBV A
+        ) TRIAL_BAL,
+        STA_FM_GL_MAST GL_MAST
+        WHERE GL_MAST.GL_CODE = TRIAL_BAL.GL_CODE
+    """
+    rows = _extract_rows(sql)
+    target_rows = [
+        row
+        for row in rows
+        if row.get("TABLE", "").upper() == "FT_GL_BALANCE_SBV"
+        and row.get("COLUMN", "").upper() == "GL_CODE"
+        and row.get("CLAUSE", "").upper() == "PROJECTION"
+    ]
+    assert target_rows
+    where_texts = [str(row.get("WHERE_CONDITION", "")).upper() for row in target_rows]
+    assert any("STA_FM_GL_MAST.GL_CODE = FT_GL_BALANCE_SBV.GL_CODE" in text for text in where_texts)

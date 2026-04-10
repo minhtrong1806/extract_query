@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import Any, Dict, List
 
 import json
 import logging
@@ -74,6 +74,9 @@ def _normalize_predicate_with_resolved_tables(
         if bool(getattr(node, "is_star", False)):
             return node
 
+        if not _column_belongs_to_select_context(node, ctx):
+            return node
+
         column_name = _column_output_name(node, placeholder_map)
         if not _should_resolve_condition_column(node, column_name):
             return node
@@ -101,6 +104,27 @@ def _normalize_predicate_with_resolved_tables(
     return predicate.copy().transform(_transform)
 
 
+def _column_belongs_to_select_context(column: exp.Column, ctx: Any) -> bool:
+    alias = (column.table or "").strip().lower()
+    if not alias:
+        return False
+
+    if alias in ctx.alias_map or alias in ctx.subquery_alias_map or alias in ctx.cte_index:
+        return True
+
+    if "." in alias:
+        alias = alias.split(".")[-1]
+        if alias in ctx.alias_map or alias in ctx.subquery_alias_map or alias in ctx.cte_index:
+            return True
+
+    for table in ctx.tables:
+        table_name = (table.name or "").strip().lower()
+        if table_name and table_name == alias:
+            return True
+
+    return False
+
+
 def _build_where_condition_map(
     ast: exp.Expression,
     node_to_block: Dict[int, int],
@@ -112,6 +136,12 @@ def _build_where_condition_map(
         "allow_text_table": True,
         "allow_first_table": True,
         "allow_table_plus_subquery": True,
+    }
+    strict_policy = {
+        "allow_text_alias": False,
+        "allow_text_table": False,
+        "allow_first_table": False,
+        "allow_table_plus_subquery": False,
     }
 
     temp_map: Dict[int, Dict[tuple[str, str, str], List[str]]] = {}
@@ -143,7 +173,7 @@ def _build_where_condition_map(
                 predicate,
                 ctx,
                 placeholder_map,
-                policy,
+                strict_policy,
             )
             predicate_sql = _format_where_sql(normalized_predicate, placeholder_map, dialect="oracle")
             if not predicate_sql:
@@ -153,20 +183,20 @@ def _build_where_condition_map(
             for column in iter_columns(predicate):
                 if not isinstance(column, exp.Column):
                     continue
-                if column.parent_select is not select:
-                    continue
                 if bool(getattr(column, "is_star", False)):
                     continue
 
                 column_name = _column_output_name(column, placeholder_map)
                 if not _should_resolve_condition_column(column, column_name):
                     continue
+                if not _column_belongs_to_select_context(column, ctx):
+                    continue
                 rows = _resolve_column_rows(
                     ctx,
                     column,
                     placeholder_map,
                     column_name,
-                    policy=policy,
+                    policy=strict_policy,
                 )
                 for row in rows:
                     table_name = row.get("TABLE", "")
