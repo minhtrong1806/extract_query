@@ -339,6 +339,22 @@ def test_order_by_alias_derived_resolves_to_dual():
     assert ("", "", "DUAL", "CNT", "DERIVED_COLUMN", "ORDER_BY") in row_set
 
 
+def test_order_by_alias_from_subquery_keeps_source_column_name():
+    """ORDER BY alias ở outer query phải truy vết về cột nguồn thật."""
+    sql = """
+        SELECT *
+        FROM (
+            SELECT FT.COUNTERPARTY AS CLIENT_NO
+            FROM KMDW.FT_MM_BALANCE FT
+        ) X
+        ORDER BY CLIENT_NO
+    """
+    rows = _extract_rows(sql)
+    row_set = _as_set(rows)
+    assert ("", "KMDW", "FT_MM_BALANCE", "COUNTERPARTY", "", "ORDER_BY") in row_set
+    assert ("", "KMDW", "FT_MM_BALANCE", "CLIENT_NO", "", "ORDER_BY") not in row_set
+
+
 def test_nested_select_output_resolves_column_from_cte_alias():
     """Truy vết cột ở select lồng trong CTE khi outer không select trực tiếp."""
     sql = """

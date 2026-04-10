@@ -21,6 +21,11 @@ LITERAL_CONCAT_PATTERN = re.compile(
     r"'{1,3}\s*\|\|\s*'([^']*)'\s*\|\|\s*'{1,3}",
     re.IGNORECASE,
 )
+QUOTED_CHUNK_CONCAT_PATTERN = re.compile(r"'\s*\|\|\s*'", re.IGNORECASE)
+GENERIC_CONCAT_VAR_PATTERN = re.compile(
+    r"\|\|\s*([A-Za-z_][A-Za-z0-9_]*)\s*\|\|",
+    re.IGNORECASE,
+)
 
 
 def _mask_placeholders(statement: str) -> Tuple[str, Dict[str, str]]:
@@ -40,14 +45,24 @@ def _normalize_dynamic_sql(statement: str) -> str:
         return statement
 
     normalized = DYNAMIC_CONCAT_PATTERN.sub(lambda m: f"#{m.group(1)}#", statement)
+    normalized = GENERIC_CONCAT_VAR_PATTERN.sub(lambda m: f"#{m.group(1)}#", normalized)
     normalized = LITERAL_CONCAT_PATTERN.sub(lambda m: f"'{m.group(1)}'", normalized)
+    normalized = QUOTED_CHUNK_CONCAT_PATTERN.sub("", normalized)
     normalized = INLINE_SELECT_INJECTION_PATTERN.sub("", normalized)
     normalized = re.sub(r",\s*SELECT\s+", ", ", normalized, flags=re.IGNORECASE)
-    normalized = re.sub(r"([A-Za-z0-9_])'(\s*,)", r"\1\2", normalized)
-    normalized = re.sub(r"([A-Za-z0-9_])'(\s+FROM\b)", r"\1\2", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"(#[A-Za-z_][A-Za-z0-9_]*#)'(\s*,)", r"\1\2", normalized)
+    normalized = re.sub(r"(#[A-Za-z_][A-Za-z0-9_]*#)'(\s+FROM\b)", r"\1\2", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(
+        r"(?<=[\s\)])'(?=(WHEN|FROM|WHERE|ORDER\s+BY|GROUP\s+BY|AND|OR|CASE|ELSE|END)\b)",
+        "",
+        normalized,
+        flags=re.IGNORECASE,
+    )
     normalized = re.sub(r"PARTITION\s*\(\s*P\s*#([^#]+)#\s*\)", "", normalized, flags=re.IGNORECASE)
     normalized = re.sub(r"PARTITION\s*\([^\)]*\)", "", normalized, flags=re.IGNORECASE)
     normalized = normalized.replace("''", "'")
+    if normalized.count("'") % 2 == 1:
+        normalized = re.sub(r"'\s*$", "", normalized)
     normalized = re.sub(r"'\s*;\s*$", ";", normalized)
     return normalized
 

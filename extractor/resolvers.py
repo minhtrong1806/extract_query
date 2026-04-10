@@ -295,7 +295,10 @@ def _resolve_column_rows(
     if strict_unqualified and not (column.table or "").strip():
         return [_make_row("", "", "", column_name, "UNRESOLVED_TABLE", placeholder_map)]
 
-    resolved_table = _resolve_table_for_column(column, ctx.alias_map, ctx.tables)
+    column_alias = (column.table or "").strip().lower()
+    resolved_table = None
+    if not (column_alias and column_alias in ctx.subquery_alias_map):
+        resolved_table = _resolve_table_for_column(column, ctx.alias_map, ctx.tables)
     if resolved_table is not None:
         table_key = (resolved_table.name or "").strip().lower()
         if table_key and table_key in ctx.cte_index:
@@ -353,6 +356,7 @@ def _resolve_column_rows(
     if resolved_subquery is not None:
         nested_target = column.name or column_name
         allow_alias_fallback = True
+        cte_nodes: set[exp.Expression] = set()
         if ctx.cte_index:
             cte_nodes = set(ctx.cte_index.values())
             if resolved_subquery in cte_nodes:
@@ -363,6 +367,11 @@ def _resolve_column_rows(
             allow_alias_fallback=allow_alias_fallback,
         )
         if resolved_rows:
+            if _subquery_has_star(resolved_subquery):
+                all_empty_reason = all(not (row.get("REASON") or "").strip() for row in resolved_rows)
+                if all_empty_reason and resolved_subquery in cte_nodes:
+                    cte_reason = "CTE_SINGLE_TABLE_FALLBACK" if len(ctx.subqueries) > 1 else "SUBQUERY_STAR_FALLBACK"
+                    resolved_rows = [{**row, "REASON": cte_reason} for row in resolved_rows]
             return resolved_rows
 
     if allow_table_plus_subquery and not (column.table or "").strip():
@@ -568,6 +577,8 @@ def _extract_rows_from_select(
     for expression in select.expressions or []:
         if isinstance(expression, exp.Star):
             has_star = True
+        if isinstance(expression, exp.Column) and bool(getattr(expression, "is_star", False)):
+            has_star = True
         output_name = _output_name(expression, placeholder_map)
         if not output_name or output_name.lower() != target_key:
             continue
@@ -579,6 +590,7 @@ def _extract_rows_from_select(
             if bool(getattr(column, "is_star", False)):
                 has_star = True
                 continue
+
             rows = _resolve_column_rows(ctx, column, placeholder_map, target_column, visited=visited)
             if rows:
                 resolved_rows.extend(rows)

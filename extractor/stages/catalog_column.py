@@ -6,6 +6,7 @@ from sqlglot import expressions as exp
 
 from ast_utils import iter_columns, iter_selects
 
+from ..context import build_select_context
 from ..formatting import _column_output_name, _expression_sql, _output_name
 from ..resolvers import _resolve_column_rows
 
@@ -147,6 +148,57 @@ class CatalogColumnStage:
                                             "schema_name": row.get("SCHEMA", ""),
                                             "table_name": row.get("TABLE", ""),
                                             "column_name": column_name,
+                                            "reason": row.get("REASON", ""),
+                                            "clause_type": clause_type,
+                                            "raw_sql": _expression_sql(column, placeholder_map, dialect="oracle"),
+                                        }
+                                    )
+                                continue
+
+                        if (
+                            clause_type == "ORDER_BY"
+                            and not (column.table or "").strip()
+                            and alias_key
+                            and not ctx.tables
+                            and ctx.subqueries
+                        ):
+                            resolved_rows: List[Dict[str, str]] = []
+                            for nested_select in iter_selects(select):
+                                if nested_select is select:
+                                    continue
+                                nested_ctx = build_select_context(
+                                    nested_select,
+                                    inherited_cte_index=ctx.cte_index,
+                                )
+                                for nested_expr in nested_select.expressions or []:
+                                    nested_output = _output_name(nested_expr, placeholder_map).strip().lower()
+                                    if nested_output != alias_key:
+                                        continue
+                                    for inner_column in iter_columns(nested_expr):
+                                        if not isinstance(inner_column, exp.Column):
+                                            continue
+                                        if bool(getattr(inner_column, "is_star", False)):
+                                            continue
+                                        inner_name = _column_output_name(inner_column, placeholder_map)
+                                        resolved_rows.extend(
+                                            _resolve_column_rows(
+                                                nested_ctx,
+                                                inner_column,
+                                                placeholder_map,
+                                                inner_name,
+                                                policy=policy,
+                                            )
+                                        )
+
+                            if resolved_rows:
+                                for row in resolved_rows:
+                                    catalog_columns.append(
+                                        {
+                                            "block_id": block_id,
+                                            "catalog_name": row.get("CATALOG", ""),
+                                            "schema_name": row.get("SCHEMA", ""),
+                                            "table_name": row.get("TABLE", ""),
+                                            "column_name": row.get("COLUMN", ""),
                                             "reason": row.get("REASON", ""),
                                             "clause_type": clause_type,
                                             "raw_sql": _expression_sql(column, placeholder_map, dialect="oracle"),
