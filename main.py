@@ -1,21 +1,72 @@
 from pathlib import Path
 import logging
+import re
+from typing import List
+
+from sqlglot import expressions as exp, parse_one
 
 from io_excel import read_excel_data, write_output_excel
 from pipeline import build_output_dataframe
 
 
+def _split_and_predicates(expression: exp.Expression) -> List[exp.Expression]:
+    if isinstance(expression, exp.And):
+        return _split_and_predicates(expression.this) + _split_and_predicates(expression.expression)
+    return [expression]
+
+
+def _extract_predicates_from_text(where_text: str) -> List[str]:
+    """Tách predicate theo AND ở top-level bằng SQL parser (an toàn cho BETWEEN ... AND ...)."""
+    cleaned = re.sub(r"(?i)^WHERE\s+", "", (where_text or "").strip()).strip()
+    cleaned = re.sub(r"(?i)^AND\s+", "", cleaned).strip()
+    if not cleaned:
+        return []
+
+    try:
+        stmt = parse_one(f"SELECT 1 FROM DUAL WHERE {cleaned}", read="oracle")
+        where = stmt.args.get("where")
+        if not isinstance(where, exp.Where) or where.this is None:
+            return [cleaned]
+        predicates = _split_and_predicates(where.this)
+        result = [item.sql(dialect="oracle").strip() for item in predicates if isinstance(item, exp.Expression)]
+        return [item for item in result if item]
+    except Exception:
+        # Fallback: giữ nguyên nguyên cụm để tránh split sai cú pháp.
+        return [cleaned]
+
+
 def _merge_unique_where(values) -> str:
-    """Gộp WHERE_CONDITION duy nhất, giữ thứ tự xuất hiện."""
+    """Gộp WHERE_CONDITION theo từng predicate, loại trùng theo bảng."""
+
+    def _normalize_key(text: str) -> str:
+        text = re.sub(r"\s+", " ", text).strip()
+        text = re.sub(r"(?i)^AND\s+", "", text).strip()
+        return text.upper()
+
     seen: set[str] = set()
-    merged: list[str] = []
+    predicates: list[str] = []
+
     for value in values:
-        text = str(value or "").strip()
-        if not text or text in seen:
+        raw = str(value or "")
+        if not raw.strip():
             continue
-        seen.add(text)
-        merged.append(text)
-    return " ; ".join(merged)
+
+        # Tách theo ';' trước (thường ngăn cách từng nhóm điều kiện),
+        # sau đó tách AND top-level bằng parser.
+        chunks = [chunk.strip() for chunk in re.split(r"[;]+", raw) if chunk.strip()]
+        for chunk in chunks:
+            for predicate in _extract_predicates_from_text(chunk):
+                key = _normalize_key(predicate)
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                predicates.append(predicate)
+
+    if not predicates:
+        return ""
+    if len(predicates) == 1:
+        return predicates[0]
+    return predicates[0] + "\nAND " + "\nAND ".join(predicates[1:])
     
 def main() -> None:
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
