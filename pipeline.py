@@ -20,6 +20,18 @@ def _normalize_table_only(table_name: str) -> str:
     return table
 
 
+def _split_table_dblink(table_name: str) -> tuple[str, str]:
+    """Tách DBLINK khỏi tên bảng theo dạng TABLE@DBLINK."""
+    table = (table_name or "").strip()
+    if not table:
+        return "", ""
+    if "@" not in table:
+        return table, ""
+    base_table, dblink = table.split("@", 1)
+    dblink = dblink.strip()
+    return base_table.strip(), (f"@{dblink}" if dblink else "")
+
+
 def build_output_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     """Tạo DataFrame đầu ra theo từng cột với SCHEMA/TABLE/COLUMN."""
     logger.info("Bat dau build_output_dataframe: %s dong", len(df))
@@ -54,12 +66,13 @@ def build_output_dataframe(df: pd.DataFrame) -> pd.DataFrame:
             schema_name = extracted["SCHEMA"]
             table_name = extracted["TABLE"]
             table_name = _normalize_table_only(table_name)
+            table_name, dblink = _split_table_dblink(table_name)
             column_name = extracted["COLUMN"]
             if isinstance(column_name, str) and column_name.upper().startswith("V_"):
                 continue
             reason = extracted.get("REASON") or ""
-            clause = extracted.get("CLAUSE") or ""
-            catalog_name = extracted.get("CATALOG") or ""
+            clause_sql = extracted.get("CLAUSE_SQL") or ""
+            clause = clause_sql or (extracted.get("CLAUSE") or "")
             where_condition = extracted.get("WHERE_CONDITION") or ""
             if not schema_name and not table_name:
                 logger.warning(
@@ -71,26 +84,25 @@ def build_output_dataframe(df: pd.DataFrame) -> pd.DataFrame:
                 )
             rows.append(
                 {
-                    "COLUMN": column_name,
                     "SCHEMA": schema_name,
                     "TABLE": table_name,
+                    "DBLINK": dblink,
+                    "COLUMN": column_name,
                     "WHERE_CONDITION": where_condition,
-                    "CATALOG": catalog_name,
                     "CLAUSE": clause,
-                    "SELECT_STATEMENT": raw_sql or cleaned_sql or "",
                 }
             )
 
     output_df = pd.DataFrame(
         rows,
-        columns=["COLUMN", "SCHEMA", "TABLE", "WHERE_CONDITION", "CATALOG", "CLAUSE", "SELECT_STATEMENT"],
+        columns=["SCHEMA", "TABLE", "DBLINK", "COLUMN", "WHERE_CONDITION", "CLAUSE"],
     )
     if output_df.empty:
         logger.warning("Output rong sau khi trich xuat")
         return output_df
-    logger.info("Sap xep output theo CATALOG/SCHEMA/TABLE/COLUMN")
+    logger.info("Sap xep output theo SCHEMA/TABLE/DBLINK/COLUMN")
     return output_df.sort_values(
-        by=["CATALOG", "SCHEMA", "TABLE", "COLUMN"],
+        by=["SCHEMA", "TABLE", "DBLINK", "COLUMN"],
         ascending=[True, True, True, True],
         kind="mergesort",
         na_position="last",

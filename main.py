@@ -14,18 +14,19 @@ def main() -> None:
     data_mask = (
         output_df["SCHEMA"].fillna("").ne("")
         | output_df["TABLE"].fillna("").ne("")
+        | output_df["DBLINK"].fillna("").ne("")
         | output_df["COLUMN"].fillna("").ne("")
     )
     output_df = output_df.loc[data_mask]
     output_df["_has_where"] = output_df["WHERE_CONDITION"].fillna("").str.len().gt(0).astype(int)
     output_df["_where_len"] = output_df["WHERE_CONDITION"].fillna("").str.len()
     output_df = output_df.sort_values(
-        by=["SCHEMA", "TABLE", "COLUMN", "_has_where", "_where_len"],
-        ascending=[True, True, True, False, False],
+        by=["SCHEMA", "TABLE", "DBLINK", "COLUMN", "_has_where", "_where_len"],
+        ascending=[True, True, True, True, False, False],
         kind="mergesort",
         na_position="last",
     )
-    output_df = output_df.drop_duplicates(subset=["SCHEMA", "TABLE", "COLUMN"]).reset_index(drop=True)
+    output_df = output_df.drop_duplicates(subset=["SCHEMA", "TABLE", "DBLINK", "COLUMN"]).reset_index(drop=True)
     output_df = output_df.drop(columns=["_has_where", "_where_len"], errors="ignore")
     write_output_excel(output_df, output_path)
 

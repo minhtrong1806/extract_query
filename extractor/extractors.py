@@ -363,6 +363,7 @@ def extract_schema_table_column_rows(
                 "COLUMN": column.get("column_name", ""),
                 "REASON": column.get("reason", ""),
                 "CLAUSE": column.get("clause_type", ""),
+                "CLAUSE_SQL": column.get("clause_sql", ""),
                 "WHERE_CONDITION": where_condition,
             }
         )

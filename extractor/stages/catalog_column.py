@@ -15,6 +15,64 @@ class CatalogColumnStage:
     """Tạo danh sách CatalogColumn theo tất cả mệnh đề."""
 
     @staticmethod
+    def _build_clause_sql(
+        clause_type: str,
+        select: exp.Select,
+        expr: exp.Expression,
+        placeholder_map: Dict[str, str],
+    ) -> str:
+        if clause_type == "PROJECTION":
+            projections = [
+                _expression_sql(item, placeholder_map, dialect="oracle")
+                for item in (select.expressions or [])
+                if isinstance(item, exp.Expression)
+            ]
+            if projections:
+                return f"SELECT {', '.join(projections)}"
+            return "SELECT"
+
+        if clause_type == "WHERE":
+            return f"WHERE {_expression_sql(expr, placeholder_map, dialect='oracle')}"
+
+        if clause_type == "HAVING":
+            return f"HAVING {_expression_sql(expr, placeholder_map, dialect='oracle')}"
+
+        if clause_type == "JOIN_ON":
+            return f"ON {_expression_sql(expr, placeholder_map, dialect='oracle')}"
+
+        if clause_type == "GROUP_BY":
+            group = select.args.get("group")
+            if isinstance(group, exp.Group) and group.expressions:
+                group_exprs = [
+                    _expression_sql(item, placeholder_map, dialect="oracle")
+                    for item in group.expressions
+                    if isinstance(item, exp.Expression)
+                ]
+                if group_exprs:
+                    return f"GROUP BY {', '.join(group_exprs)}"
+            return "GROUP BY"
+
+        if clause_type == "ORDER_BY":
+            order = select.args.get("order")
+            if isinstance(order, exp.Order) and order.expressions:
+                order_exprs = [
+                    _expression_sql(item, placeholder_map, dialect="oracle")
+                    for item in order.expressions
+                    if isinstance(item, exp.Expression)
+                ]
+                if order_exprs:
+                    return f"ORDER BY {', '.join(order_exprs)}"
+            return "ORDER BY"
+
+        if clause_type == "WINDOW":
+            return f"WINDOW {_expression_sql(expr, placeholder_map, dialect='oracle')}"
+
+        if clause_type == "QUALIFY":
+            return f"QUALIFY {_expression_sql(expr, placeholder_map, dialect='oracle')}"
+
+        return _expression_sql(expr, placeholder_map, dialect="oracle")
+
+    @staticmethod
     def _resolve_clause_expressions(
         select: exp.Select,
     ) -> List[Tuple[str, List[exp.Expression]]]:
@@ -96,6 +154,7 @@ class CatalogColumnStage:
                 for expr in exprs:
                     if not isinstance(expr, exp.Expression):
                         continue
+                    clause_sql = self._build_clause_sql(clause_type, select, expr, placeholder_map)
                     for column in iter_columns(expr):
                         if not isinstance(column, exp.Column):
                             continue
@@ -120,6 +179,7 @@ class CatalogColumnStage:
                                             "column_name": column_name.upper() if column_name else column_name,
                                             "reason": "DERIVED_COLUMN",
                                             "clause_type": clause_type,
+                                            "clause_sql": clause_sql,
                                             "raw_sql": _expression_sql(column, placeholder_map, dialect="oracle"),
                                         }
                                     )
@@ -150,6 +210,7 @@ class CatalogColumnStage:
                                             "column_name": column_name,
                                             "reason": row.get("REASON", ""),
                                             "clause_type": clause_type,
+                                            "clause_sql": clause_sql,
                                             "raw_sql": _expression_sql(column, placeholder_map, dialect="oracle"),
                                         }
                                     )
@@ -201,6 +262,7 @@ class CatalogColumnStage:
                                             "column_name": row.get("COLUMN", ""),
                                             "reason": row.get("REASON", ""),
                                             "clause_type": clause_type,
+                                            "clause_sql": clause_sql,
                                             "raw_sql": _expression_sql(column, placeholder_map, dialect="oracle"),
                                         }
                                     )
@@ -223,6 +285,7 @@ class CatalogColumnStage:
                                     "column_name": row.get("COLUMN", ""),
                                     "reason": row.get("REASON", ""),
                                     "clause_type": clause_type,
+                                    "clause_sql": clause_sql,
                                     "raw_sql": _expression_sql(column, placeholder_map, dialect="oracle"),
                                 }
                             )
