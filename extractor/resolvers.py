@@ -373,6 +373,27 @@ def _resolve_column_rows(
                     cte_reason = "CTE_SINGLE_TABLE_FALLBACK" if len(ctx.subqueries) > 1 else "SUBQUERY_STAR_FALLBACK"
                     resolved_rows = [{**row, "REASON": cte_reason} for row in resolved_rows]
             return resolved_rows
+        if resolved_subquery in cte_nodes:
+            collected_tables = _collect_tables_from_expression(resolved_subquery, cte_index=ctx.cte_index)
+            unique_tables = {
+                (table.name, table.db or "", table.catalog or "")
+                for table in collected_tables
+                if table.name and table.name.strip().lower() != "dual"
+            }
+            if unique_tables:
+                rows: List[dict[str, str]] = []
+                for name, schema, catalog in unique_tables:
+                    rows.append(
+                        _make_row(
+                            catalog or "",
+                            schema or "",
+                            name or "",
+                            column_name,
+                            "CTE_ANY_TABLE_FALLBACK",
+                            placeholder_map,
+                        )
+                    )
+                return rows
 
     if allow_table_plus_subquery and not (column.table or "").strip():
         if len(ctx.tables) == 1 and len(ctx.subqueries) == 1:
@@ -410,10 +431,16 @@ def _resolve_column_rows(
                     return [_make_row(single_table.catalog or "", schema_name, table_name, column_name, "CTE_SINGLE_TABLE_FALLBACK", placeholder_map)]
                 collected_tables = _collect_tables_from_expression(ctx.cte_index[cte_key], cte_index=ctx.cte_index)
                 if collected_tables:
-                    table = collected_tables[0]
-                    schema_name = table.db or table.catalog or ""
-                    table_name = table.name or ""
-                    return [_make_row(table.catalog or "", schema_name, table_name, column_name, "CTE_ANY_TABLE_FALLBACK", placeholder_map)]
+                    unique_tables = {
+                        (table.name, table.db or "", table.catalog or "")
+                        for table in collected_tables
+                        if table.name and table.name.strip().lower() != "dual"
+                    }
+                    if unique_tables:
+                        return [
+                            _make_row(catalog or "", schema or "", name or "", column_name, "CTE_ANY_TABLE_FALLBACK", placeholder_map)
+                            for name, schema, catalog in unique_tables
+                        ]
             if logger is not None:
                 logger.debug(
                     "Trace fallback alias tu SQL text cho column '%s' (alias '%s') -> %s.%s",
@@ -555,9 +582,6 @@ def _resolve_column_rows(
                 table_name = table.name or ""
                 return [_make_row(table.catalog or "", schema_name, table_name, column_name, "CTE_ANY_TABLE_FALLBACK", placeholder_map)]
         return [_make_row("", schema_name, table_name, column_name, "TEXT_TABLE_FALLBACK", placeholder_map)]
-
-    if ctx.has_subquery_source and not ctx.alias_map:
-        return [_make_row("", "", "", column_name, "SUBQUERY_SOURCE_ONLY", placeholder_map)]
 
     reason = "UNRESOLVED_TABLE" if ctx.tables else "SUBQUERY_UNRESOLVED"
     return [_make_row("", "", "", column_name, reason, placeholder_map)]
