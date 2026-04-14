@@ -34,6 +34,19 @@ def build_select_context(
         select,
         cte_index=cte_index,
     )
+    outer_alias_map, outer_subquery_alias_map = _collect_outer_alias_context(
+        select,
+        cte_index=cte_index,
+    )
+    for alias_key, table in outer_alias_map.items():
+        alias_map.setdefault(alias_key, table)
+    for alias_key, subquery in outer_subquery_alias_map.items():
+        # Không để correlated context từ SELECT cha ghi đè alias bảng vật lý local.
+        # Ví dụ: inner có alias bảng "A", outer có subquery alias "A".
+        # Trường hợp này phải ưu tiên bảng local để resolve A.COL_X đúng.
+        if alias_key in alias_map:
+            continue
+        subquery_alias_map.setdefault(alias_key, subquery)
     star_aliases = _collect_star_aliases(select)
     if text_alias_map is None:
         text_alias_map = _build_alias_map_from_sql(sql_text or "")
@@ -56,6 +69,37 @@ def build_select_context(
         fallback_tables=fallback_tables,
         cte_index=cte_index,
     )
+
+
+def _collect_outer_alias_context(
+    select: exp.Select,
+    cte_index: Dict[str, exp.Expression] | None = None,
+) -> tuple[Dict[str, exp.Table], Dict[str, exp.Expression]]:
+    """Thu thập alias/subquery_alias từ các SELECT cha để hỗ trợ correlated subquery."""
+    merged_alias_map: Dict[str, exp.Table] = {}
+    merged_subquery_alias_map: Dict[str, exp.Expression] = {}
+    visited: set[int] = set()
+
+    parent_select = select.parent_select
+    while isinstance(parent_select, exp.Select):
+        node_id = id(parent_select)
+        if node_id in visited:
+            break
+        visited.add(node_id)
+
+        parent_alias_map, parent_subquery_alias_map, _tables, _subqueries, _has_subquery_source = _build_alias_context(
+            parent_select,
+            cte_index=cte_index,
+        )
+
+        for alias_key, table in parent_alias_map.items():
+            merged_alias_map.setdefault(alias_key, table)
+        for alias_key, subquery in parent_subquery_alias_map.items():
+            merged_subquery_alias_map.setdefault(alias_key, subquery)
+
+        parent_select = parent_select.parent_select
+
+    return merged_alias_map, merged_subquery_alias_map
 
 
 def build_global_cte_index(ast: exp.Expression | None) -> Dict[str, exp.Expression]:

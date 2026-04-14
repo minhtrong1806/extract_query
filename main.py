@@ -6,6 +6,7 @@ from typing import List
 from sqlglot import expressions as exp, parse_one
 
 from io_excel import read_excel_data, write_output_excel
+from parser import parse_select_statement
 from pipeline import build_output_dataframe
 
 
@@ -67,13 +68,50 @@ def _merge_unique_where(values) -> str:
     if len(predicates) == 1:
         return predicates[0]
     return predicates[0] + "\nAND " + "\nAND ".join(predicates[1:])
+
+
+def _has_select_star(sql_text: str) -> bool:
+    """Kiểm tra SELECT list có chứa * hay alias.* để cảnh báo tự rà soát."""
+    text = str(sql_text or "").strip()
+    if not text:
+        return False
+
+    parse_result = parse_select_statement(text)
+    if parse_result.ast is not None:
+        for select in parse_result.ast.find_all(exp.Select):
+            for projection in select.expressions or []:
+                if isinstance(projection, exp.Star):
+                    return True
+                if isinstance(projection, exp.Column) and bool(getattr(projection, "is_star", False)):
+                    return True
+                if any(True for _ in projection.find_all(exp.Star)):
+                    return True
+
+    # Fallback khi parse fail: regex cơ bản cho SELECT * hoặc alias.*
+    return bool(re.search(r"(?is)\bSELECT\b[\s\S]*?\b(\*|[A-Z_][A-Z0-9_$#]*\.\*)\b", text, re.IGNORECASE))
     
 def main() -> None:
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
     data_path = Path(__file__).resolve().parent / "data" / "ETL_SCRIPT_KM_ETL.xlsx"
     output_path = Path(__file__).resolve().parent / "output" / "ETL_SCRIPT_KM_ETL_SCHEMA_TABLE_COLUMN.xlsx"
+    select_star_alert_path = Path(__file__).resolve().parent / "output" / "ETL_SCRIPT_KM_ETL_SELECT_STAR_ALERT.xlsx"
 
     df = read_excel_data(data_path)
+
+    select_star_mask = df["SELECT_STATEMENT_CLEANED"].astype(str).apply(_has_select_star)
+    if select_star_mask.any():
+        star_df = df.loc[
+            select_star_mask,
+            [col for col in ["JOB_NAME", "READ_MODE", "SELECT_STATEMENT", "SELECT_STATEMENT_CLEANED"] if col in df.columns],
+        ].copy()
+        star_df.insert(0, "ROW_INDEX", star_df.index)
+        write_output_excel(star_df, select_star_alert_path)
+        logging.warning(
+            "Phat hien %s dong co SELECT * / alias.*. Da ghi danh sach can tu check tai: %s",
+            len(star_df),
+            select_star_alert_path,
+        )
+
     output_df = build_output_dataframe(df)
     data_mask = (
         output_df["SCHEMA"].fillna("").ne("")

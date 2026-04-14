@@ -45,15 +45,33 @@ def _table_key(catalog_name: str, schema_name: str, table_name: str) -> tuple[st
     return (catalog_name.upper(), schema_name.upper(), table_name.upper())
 
 
-def _pick_physical_row(rows: List[dict[str, str]]) -> dict[str, str] | None:
+def _pick_physical_row(
+    rows: List[dict[str, str]],
+    preferred_table_key: tuple[str, str, str] | None = None,
+) -> dict[str, str] | None:
+    physical_rows: List[dict[str, str]] = []
     for row in rows:
         table_name = (row.get("TABLE") or "").strip()
         if not table_name:
             continue
         if table_name.upper() == "DUAL":
             continue
-        return row
-    return None
+        physical_rows.append(row)
+
+    if not physical_rows:
+        return None
+
+    if preferred_table_key is not None:
+        for row in physical_rows:
+            row_key = _table_key(
+                row.get("CATALOG", ""),
+                row.get("SCHEMA", ""),
+                row.get("TABLE", ""),
+            )
+            if row_key == preferred_table_key:
+                return row
+
+    return physical_rows[0]
 
 
 def _should_resolve_condition_column(column: exp.Column, column_name: str) -> bool:
@@ -67,6 +85,7 @@ def _normalize_predicate_with_resolved_tables(
     ctx: Any,
     placeholder_map: Dict[str, str],
     policy: Dict[str, bool],
+    preferred_table_key: tuple[str, str, str] | None = None,
 ) -> exp.Expression:
     def _transform(node: exp.Expression) -> exp.Expression:
         if not isinstance(node, exp.Column):
@@ -88,7 +107,7 @@ def _normalize_predicate_with_resolved_tables(
             column_name,
             policy=policy,
         )
-        chosen = _pick_physical_row(rows)
+        chosen = _pick_physical_row(rows, preferred_table_key=preferred_table_key)
         if not chosen:
             return node
 
@@ -96,8 +115,14 @@ def _normalize_predicate_with_resolved_tables(
         if not table_name:
             return node
 
+        source_column_name = (
+            (chosen.get("COLUMN") or "").strip()
+            or node.name
+            or column_name
+        )
+
         return exp.Column(
-            this=exp.to_identifier(node.name or column_name),
+            this=exp.to_identifier(source_column_name),
             table=exp.to_identifier(table_name),
         )
 
@@ -169,16 +194,6 @@ def _build_where_condition_map(
                 predicates.extend(_split_and_predicates(join_on))
 
         for predicate in predicates:
-            normalized_predicate = _normalize_predicate_with_resolved_tables(
-                predicate,
-                ctx,
-                placeholder_map,
-                strict_policy,
-            )
-            predicate_sql = _format_where_sql(normalized_predicate, placeholder_map, dialect="oracle")
-            if not predicate_sql:
-                continue
-
             table_keys: set[tuple[str, str, str]] = set()
             for column in iter_columns(predicate):
                 if not isinstance(column, exp.Column):
@@ -217,6 +232,16 @@ def _build_where_condition_map(
 
             block_bucket = temp_map.setdefault(block_id, {})
             for key in table_keys:
+                normalized_predicate = _normalize_predicate_with_resolved_tables(
+                    predicate,
+                    ctx,
+                    placeholder_map,
+                    strict_policy,
+                    preferred_table_key=key,
+                )
+                predicate_sql = _format_where_sql(normalized_predicate, placeholder_map, dialect="oracle")
+                if not predicate_sql:
+                    continue
                 conditions = block_bucket.setdefault(key, [])
                 if predicate_sql not in conditions:
                     conditions.append(predicate_sql)

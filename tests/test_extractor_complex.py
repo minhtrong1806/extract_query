@@ -486,3 +486,111 @@ def test_where_condition_resolves_subquery_alias_to_base_table():
     assert target_rows
     where_texts = [str(row.get("WHERE_CONDITION", "")).upper() for row in target_rows]
     assert any("STA_FM_GL_MAST.GL_CODE = FT_GL_BALANCE_SBV.GL_CODE" in text for text in where_texts)
+
+
+def test_correlated_subquery_resolves_outer_reference_column():
+    """Correlated subquery phải map A.REFERENCE về bảng outer, không map sai vào bảng lookup."""
+    sql = """
+        SELECT
+            A.COLLAT_VALUE AS REV_MKT_VALUE,
+            A.TOT_ASSIGND_AMT AS ASSGND_AMT,
+            A.TOT_USABLE_AMT AS USABLE_VALUE,
+            A.ACCT_EXEC,
+            DECODE(
+                (SELECT UNIT FROM KMDW.STA_FM_METALS WHERE COLLAT_REF = A.REFERENCE),
+                NULL,
+                DECODE(
+                    (SELECT UNIT FROM KMDW.STA_FM_FINISHD_GOODS WHERE COLLAT_REF = A.REFERENCE),
+                    NULL,
+                    (SELECT UNIT FROM KMDW.STA_FM_RAW_MATERIALS WHERE COLLAT_REF = A.REFERENCE),
+                    (SELECT UNIT FROM KMDW.STA_FM_FINISHD_GOODS WHERE COLLAT_REF = A.REFERENCE)
+                ),
+                (SELECT UNIT FROM KMDW.STA_FM_METALS WHERE COLLAT_REF = A.REFERENCE)
+            ) AS UNIT
+        FROM KMDW.FT_COLLATERAL_STATIC A
+    """
+    rows = _extract_rows(sql)
+    row_set = _as_set(rows)
+
+    assert ("", "KMDW", "FT_COLLATERAL_STATIC", "REFERENCE", "", "WHERE") in row_set
+    assert ("", "KMDW", "STA_FM_METALS", "REFERENCE", "", "WHERE") not in row_set
+    assert ("", "KMDW", "STA_FM_FINISHD_GOODS", "REFERENCE", "", "WHERE") not in row_set
+    assert ("", "KMDW", "STA_FM_RAW_MATERIALS", "REFERENCE", "", "WHERE") not in row_set
+
+
+def test_correlated_context_does_not_override_local_table_alias():
+    """Alias subquery outer trùng tên không được ghi đè alias bảng local ở inner SELECT."""
+    sql = """
+        SELECT A.COLLAT_CODE
+        FROM (
+            SELECT A.COLLAT_CODE
+            FROM KMDW.FT_COLLATERAL_STATIC A
+            WHERE EXISTS (
+                SELECT 1
+                FROM KMDW.STA_FM_METALS M
+                WHERE M.COLLAT_REF = A.REFERENCE
+            )
+        ) A
+    """
+    rows = _extract_rows(sql)
+    row_set = _as_set(rows)
+
+    assert ("", "KMDW", "FT_COLLATERAL_STATIC", "COLLAT_CODE", "", "PROJECTION") in row_set
+    assert ("", "", "A", "COLLAT_CODE", "SUBQUERY_ALIAS_FALLBACK", "PROJECTION") not in row_set
+
+
+def test_where_condition_uses_physical_source_column_from_subquery_alias():
+    """JOIN với subquery alias COLLAT_REF phải hiển thị cột vật lý COLL_REF trong WHERE_CONDITION."""
+    sql = """
+        SELECT A.REFERENCE
+        FROM KMDW.FT_COLLATERAL_STATIC A
+        LEFT JOIN (
+            SELECT COLL_REF AS COLLAT_REF
+            FROM KMDW.STA_FM_VEHICLE
+        ) VH ON A.REFERENCE = VH.COLLAT_REF
+    """
+    rows = _extract_rows(sql)
+    target_rows = [
+        row
+        for row in rows
+        if row.get("TABLE", "").upper() == "STA_FM_VEHICLE"
+        and row.get("COLUMN", "").upper() == "COLL_REF"
+    ]
+    assert target_rows
+    where_texts = [str(row.get("WHERE_CONDITION", "")).upper() for row in target_rows]
+    assert any("FT_COLLATERAL_STATIC.REFERENCE = STA_FM_VEHICLE.COLL_REF" in text for text in where_texts)
+    assert all("STA_FM_VEHICLE.COLLAT_REF" not in text for text in where_texts)
+
+
+def test_where_condition_for_union_subquery_uses_matching_table():
+    """Không được gán cứng điều kiện của METALS/RAW/FINISHD về STA_FM_SHARE."""
+    sql = """
+        SELECT A.REFERENCE
+        FROM KMDW.FT_COLLATERAL_STATIC A
+        LEFT JOIN (
+            SELECT COLLAT_REF AS COLLAT_REF FROM KMDW.STA_FM_SHARE
+            UNION ALL
+            SELECT COLLAT_REF AS COLLAT_REF FROM KMDW.STA_FM_METALS
+            UNION ALL
+            SELECT COLLAT_REF AS COLLAT_REF FROM KMDW.STA_FM_RAW_MATERIALS
+            UNION ALL
+            SELECT COLLAT_REF AS COLLAT_REF FROM KMDW.STA_FM_FINISHD_GOODS
+        ) MESHAMAGOD ON A.REFERENCE = MESHAMAGOD.COLLAT_REF
+    """
+    rows = _extract_rows(sql)
+
+    def _where_for(table_name: str) -> list[str]:
+        return [
+            str(row.get("WHERE_CONDITION", "")).upper()
+            for row in rows
+            if row.get("TABLE", "").upper() == table_name
+            and row.get("COLUMN", "").upper() == "COLLAT_REF"
+        ]
+
+    metals_where = _where_for("STA_FM_METALS")
+    raw_where = _where_for("STA_FM_RAW_MATERIALS")
+    finish_where = _where_for("STA_FM_FINISHD_GOODS")
+
+    assert metals_where and any("FT_COLLATERAL_STATIC.REFERENCE = STA_FM_METALS.COLLAT_REF" in text for text in metals_where)
+    assert raw_where and any("FT_COLLATERAL_STATIC.REFERENCE = STA_FM_RAW_MATERIALS.COLLAT_REF" in text for text in raw_where)
+    assert finish_where and any("FT_COLLATERAL_STATIC.REFERENCE = STA_FM_FINISHD_GOODS.COLLAT_REF" in text for text in finish_where)
