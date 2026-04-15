@@ -52,11 +52,15 @@ def build_select_context(
         text_alias_map = _build_alias_map_from_sql(sql_text or "")
     if text_tables is None:
         text_tables = _extract_tables_from_sql(sql_text or "")
-    fallback_tables = [
-        table
-        for table in select.find_all(exp.Table)
-        if table.name and table.name.strip().lower() not in cte_index
-    ]
+    fallback_tables = []
+    for source in _iter_select_sources(select):
+        if not isinstance(source, exp.Table):
+            continue
+        if not source.name:
+            continue
+        if source.name.strip().lower() in cte_index:
+            continue
+        fallback_tables.append(source)
     return SelectContext(
         alias_map=alias_map,
         subquery_alias_map=subquery_alias_map,

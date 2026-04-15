@@ -654,3 +654,41 @@ def test_unqualified_unknown_column_in_multi_source_block_is_unresolved_instead_
     assert ("", "", "", "UNKNOWN_COL", "UNRESOLVED_TABLE", "PROJECTION") in row_set
     assert ("", "KMDW", "DM_CLIENT", "UNKNOWN_COL", "TEXT_TABLE_FALLBACK", "PROJECTION") not in row_set
     assert ("", "KMDW", "FT_LOAN_DD_BALANCE_ALL_V", "UNKNOWN_COL", "TEXT_TABLE_FALLBACK", "PROJECTION") not in row_set
+
+
+def test_cte_alias_projection_keeps_physical_source_column_name():
+    """A.INT_RATE từ CTE TMP_CA phải truy vết về CR_ACCT_LEVEL_INT_RATE của bảng gốc."""
+    sql = """
+        WITH TMP_CA AS (
+            SELECT
+                A.SYM_RUN_DATE,
+                A.BRANCH_NO,
+                A.CLIENT_NO,
+                CR_ACCT_LEVEL_INT_RATE AS INT_RATE
+            FROM KMDW.FT_DEPOSIT_BALANCE_STATIC_CA A
+            WHERE A.SYM_RUN_DATE BETWEEN :IP_FROM_DATE AND :IP_TO_DATE
+        )
+        SELECT A.BRANCH_NO, A.CLIENT_NO, A.INT_RATE
+        FROM TMP_CA A
+    """
+    rows = _extract_rows(sql)
+    row_set = _as_set(rows)
+
+    assert ("", "KMDW", "FT_DEPOSIT_BALANCE_STATIC_CA", "CR_ACCT_LEVEL_INT_RATE", "", "PROJECTION") in row_set
+    assert ("", "KMDW", "FT_DEPOSIT_BALANCE_STATIC_CA", "INT_RATE", "", "PROJECTION") not in row_set
+
+
+def test_alias_currency_from_ft_tf_margin_uses_ccy_not_currency():
+    """A.CURRENCY (alias từ M.CCY) không được map sai thành FT_TF_MARGIN.CURRENCY."""
+    sql = """
+        SELECT A.CURRENCY
+        FROM (
+            SELECT M.CCY AS CURRENCY
+            FROM KMDW.FT_TF_MARGIN M
+        ) A
+    """
+    rows = _extract_rows(sql)
+    row_set = _as_set(rows)
+
+    assert ("", "KMDW", "FT_TF_MARGIN", "CCY", "", "PROJECTION") in row_set
+    assert ("", "KMDW", "FT_TF_MARGIN", "CURRENCY", "", "PROJECTION") not in row_set
