@@ -87,8 +87,21 @@ def _has_select_star(sql_text: str) -> bool:
                 if any(True for _ in projection.find_all(exp.Star)):
                     return True
 
-    # Fallback khi parse fail: regex cơ bản cho SELECT * hoặc alias.*
-    return bool(re.search(r"(?is)\bSELECT\b[\s\S]*?\b(\*|[A-Z_][A-Z0-9_$#]*\.\*)\b", text, re.IGNORECASE))
+    # Fallback khi parse fail: tách SELECT list bằng regex và dò token * / alias.*
+    # (không dùng \b quanh * vì * không phải word-char).
+    scrubbed_text = re.sub(r"'(?:''|[^'])*'", "''", text)
+    scrubbed_text = re.sub(r'"(?:""|[^"])*"', '""', scrubbed_text)
+
+    for match in re.finditer(r"(?is)\bSELECT\b(?P<select_list>[\s\S]*?)\bFROM\b", scrubbed_text):
+        select_list = match.group("select_list")
+        select_list = re.sub(r"(?is)^\s*(ALL|DISTINCT|UNIQUE)\s+", "", select_list)
+        if re.search(
+            r"(?is)(^|,)\s*(?:(?:\"[^\"]+\"|[A-Za-z_][A-Za-z0-9_$#]*)\s*\.\s*)?\*\s*(?=,|$)",
+            select_list,
+        ):
+            return True
+
+    return False
     
 def main() -> None:
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")

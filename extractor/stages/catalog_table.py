@@ -30,9 +30,20 @@ class CatalogTableStage:
             if block_id is None:
                 continue
 
+            # Chỉ dùng SQL text của chính block SELECT hiện tại để build text fallback context.
+            # Tránh trộn alias/tables từ block khác gây map sai nguồn cột.
+            select_sql_text = _expression_sql(select, placeholder_map, dialect="oracle")
+            if sql_text is None:
+                context_sql_text = select_sql_text
+            elif isinstance(sql_text, str) and not sql_text.strip():
+                # Cho phép caller tắt text-fallback bằng cách truyền chuỗi rỗng.
+                context_sql_text = sql_text
+            else:
+                context_sql_text = select_sql_text
+
             ctx = build_select_context(
                 select,
-                sql_text=sql_text,
+                sql_text=context_sql_text,
                 inherited_cte_index=global_cte_index,
             )
             select_context_by_block[block_id] = ctx

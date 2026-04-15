@@ -292,6 +292,47 @@ def _resolve_column_rows(
 
         return []
 
+    def _resolve_unqualified_from_matching_subqueries() -> List[dict[str, str]]:
+        if (column.table or "").strip():
+            return []
+        if not ctx.subqueries:
+            return []
+
+        nested_target = column.name or column_name
+        matching_subqueries = [
+            subquery
+            for subquery in ctx.subqueries
+            if _subquery_has_output(subquery, placeholder_map, nested_target)
+        ]
+        if not matching_subqueries:
+            return []
+
+        if len(matching_subqueries) == 1:
+            return _resolve_from_subquery(
+                matching_subqueries[0],
+                nested_target,
+                allow_alias_fallback=False,
+            )
+
+        subquery_rows = _extract_rows_from_any_subquery(
+            matching_subqueries,
+            placeholder_map,
+            nested_target,
+            cte_index=ctx.cte_index,
+            visited=visited,
+        )
+        if subquery_rows:
+            if nested_target != column_name:
+                return [
+                    {
+                        **row,
+                        "COLUMN": column_name.upper() if column_name else column_name,
+                    }
+                    for row in subquery_rows
+                ]
+            return subquery_rows
+        return []
+
     if strict_unqualified and not (column.table or "").strip():
         return [_make_row("", "", "", column_name, "UNRESOLVED_TABLE", placeholder_map)]
 
@@ -299,6 +340,10 @@ def _resolve_column_rows(
     resolved_table = None
     if not (column_alias and column_alias in ctx.subquery_alias_map):
         resolved_table = _resolve_table_for_column(column, ctx.alias_map, ctx.tables)
+    if resolved_table is not None and not (column.table or "").strip() and ctx.subqueries:
+        # Không tự gán cột unqualified vào bảng vật lý khi cùng block còn có subquery.
+        # Trường hợp này cần resolve theo output subquery hoặc để unresolved.
+        resolved_table = None
     if resolved_table is not None:
         table_key = (resolved_table.name or "").strip().lower()
         if table_key and table_key in ctx.cte_index:
@@ -395,22 +440,20 @@ def _resolve_column_rows(
                     )
                 return rows
 
-    if allow_table_plus_subquery and not (column.table or "").strip():
-        if len(ctx.tables) == 1 and len(ctx.subqueries) == 1:
-            nested_target = column.name or column_name
-            resolved_rows = _resolve_from_subquery(
-                ctx.subqueries[0],
-                nested_target,
-                allow_alias_fallback=False,
-            )
-            if resolved_rows:
-                return resolved_rows
-            only_table = ctx.tables[0]
-            schema_name = only_table.db or only_table.catalog or ""
-            table_name = only_table.name or ""
-            return [_make_row(only_table.catalog or "", schema_name, table_name, column_name, "", placeholder_map)]
+    # Ưu tiên resolve cột không định danh bảng từ subquery output nếu tên cột tồn tại
+    # trong projection của subquery. Điều này tránh map nhầm sang bảng vật lý đầu tiên
+    # (ví dụ DM_CLIENT) khi FROM có cấu trúc: (subquery) A, TABLE_1, TABLE_2, ...
+    subquery_output_rows = _resolve_unqualified_from_matching_subqueries()
+    if subquery_output_rows:
+        return subquery_output_rows
 
-    if allow_text_alias:
+    allow_text_fallback_for_current_column = True
+    if not (column.table or "").strip() and (ctx.subqueries or len(ctx.tables) > 1):
+        # Với cột unqualified trong ngữ cảnh nhiều nguồn (đặc biệt có subquery),
+        # text fallback rất dễ suy luận sai do regex FROM/JOIN không bao quát đầy đủ.
+        allow_text_fallback_for_current_column = False
+
+    if allow_text_alias and allow_text_fallback_for_current_column:
         text_resolution = _resolve_table_from_text_alias(column, ctx.text_alias_map, ctx.text_tables)
         if text_resolution is not None:
             schema_name, table_name = text_resolution
@@ -552,13 +595,19 @@ def _resolve_column_rows(
                     table_name = single_table.name or ""
                     return [_make_row(single_table.catalog or "", schema_name, table_name, column_name, "STAR_ALIAS_FALLBACK", placeholder_map)]
 
-    if allow_first_table and not column.table and ctx.tables:
+    if allow_first_table and not column.table and ctx.tables and not ctx.subqueries:
         primary = ctx.tables[0]
         schema_name = primary.db or primary.catalog or ""
         table_name = primary.name or ""
         return [_make_row(primary.catalog or "", schema_name, table_name, column_name, "FIRST_TABLE_FALLBACK", placeholder_map)]
 
-    if allow_text_table and ctx.text_tables:
+    allow_text_table_fallback_for_current_column = True
+    if not (column.table or "").strip() and (ctx.subqueries or len(ctx.tables) > 1):
+        # Cột unqualified trong ngữ cảnh nhiều nguồn nên ưu tiên resolve AST theo block,
+        # không lấy bảng đầu tiên từ text_tables để tránh map sai hàng loạt.
+        allow_text_table_fallback_for_current_column = False
+
+    if allow_text_table and allow_text_table_fallback_for_current_column and ctx.text_tables:
         schema_name, table_name = ctx.text_tables[0]
         cte_key = (table_name or "").strip().lower()
         if cte_key and cte_key in ctx.cte_index:

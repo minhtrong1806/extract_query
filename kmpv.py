@@ -104,6 +104,39 @@ def _merge_unique_where(values) -> str:
     return predicates[0] + "\nAND " + "\nAND ".join(predicates[1:])
 
 
+def _has_select_star(sql_text: str) -> bool:
+    """Kiểm tra SELECT list có chứa * hay alias.* để cảnh báo tự rà soát."""
+    text = str(sql_text or "").strip()
+    if not text:
+        return False
+
+    parse_result = parse_select_statement(text)
+    if parse_result.ast is not None:
+        for select in parse_result.ast.find_all(exp.Select):
+            for projection in select.expressions or []:
+                if isinstance(projection, exp.Star):
+                    return True
+                if isinstance(projection, exp.Column) and bool(getattr(projection, "is_star", False)):
+                    return True
+                if any(True for _ in projection.find_all(exp.Star)):
+                    return True
+
+    # Fallback khi parse fail: tách SELECT list bằng regex và dò token * / alias.*
+    scrubbed_text = re.sub(r"'(?:''|[^'])*'", "''", text)
+    scrubbed_text = re.sub(r'"(?:""|[^"])*"', '""', scrubbed_text)
+
+    for match in re.finditer(r"(?is)\bSELECT\b(?P<select_list>[\s\S]*?)\bFROM\b", scrubbed_text):
+        select_list = match.group("select_list")
+        select_list = re.sub(r"(?is)^\s*(ALL|DISTINCT|UNIQUE)\s+", "", select_list)
+        if re.search(
+            r"(?is)(^|,)\s*(?:(?:\"[^\"]+\"|[A-Za-z_][A-Za-z0-9_$#]*)\s*\.\s*)?\*\s*(?=,|$)",
+            select_list,
+        ):
+            return True
+
+    return False
+
+
 def _error_row(row_id: int, report_id: str, system_name: str, report_name: str, log_message: str) -> dict[str, str | int]:
     return {
         "_INPUT_ROW": row_id,
@@ -243,6 +276,26 @@ def main() -> None:
     output_path = base_dir / "output" / "KMPV_SCRIPT_REPORT_10APR2026_V1.0_merged_SCHEMA_TABLE_COLUMN.xlsx"
 
     source_df = pd.read_excel(input_path, sheet_name="Sheet1")
+
+    select_star_clean_sql = source_df.get("report_script", pd.Series(dtype=object)).astype(str).map(_clean_sql)
+    select_star_mask = select_star_clean_sql.map(_has_select_star)
+    if bool(select_star_mask.any()):
+        star_df = source_df.loc[select_star_mask, [col for col in ["REPORT_ID", "SYSTEM", "REPORT_NAME"] if col in source_df.columns]]
+        logging.warning(
+            "Phat hien %s report co SELECT * / alias.* trong KMPV input",
+            int(select_star_mask.sum()),
+        )
+        for row_idx, row in star_df.head(20).iterrows():
+            logging.warning(
+                "[SELECT_STAR] row=%s REPORT_ID=%s SYSTEM=%s REPORT_NAME=%s",
+                row_idx,
+                str(row.get("REPORT_ID", "") or "").strip(),
+                str(row.get("SYSTEM", "") or "").strip(),
+                str(row.get("REPORT_NAME", "") or "").strip(),
+            )
+        if len(star_df) > 20:
+            logging.warning("[SELECT_STAR] ... va %s report khac", len(star_df) - 20)
+
     chunks: list[pd.DataFrame] = []
 
     for row_id, row in source_df.iterrows():

@@ -594,3 +594,63 @@ def test_where_condition_for_union_subquery_uses_matching_table():
     assert metals_where and any("FT_COLLATERAL_STATIC.REFERENCE = STA_FM_METALS.COLLAT_REF" in text for text in metals_where)
     assert raw_where and any("FT_COLLATERAL_STATIC.REFERENCE = STA_FM_RAW_MATERIALS.COLLAT_REF" in text for text in raw_where)
     assert finish_where and any("FT_COLLATERAL_STATIC.REFERENCE = STA_FM_FINISHD_GOODS.COLLAT_REF" in text for text in finish_where)
+
+
+def test_unqualified_projection_prefers_subquery_output_over_lookup_table_fallback():
+    """Cột unqualified từ subquery A không được map nhầm vào bảng lookup (DM_CLIENT)."""
+    sql = """
+        SELECT BRANCH_NO, CL.CLIENT_TYPE
+        FROM (
+            SELECT T.BRANCH_NO, T.CLIENT_NO, T.COLLAT_REF
+            FROM KMDW.FT_LOAN_DD_BALANCE_ALL_V T
+        ) A,
+        KMDW.DM_CLIENT CL,
+        KMDW.STA_FM_COLL_CERT CO
+        WHERE A.CLIENT_NO = CL.CLIENT_NO
+          AND A.COLLAT_REF = CO.COLL_REF(+)
+    """
+    rows = _extract_rows(sql)
+    row_set = _as_set(rows)
+
+    assert ("", "KMDW", "FT_LOAN_DD_BALANCE_ALL_V", "BRANCH_NO", "", "PROJECTION") in row_set
+    assert ("", "KMDW", "DM_CLIENT", "BRANCH_NO", "", "PROJECTION") not in row_set
+    assert ("", "KMDW", "DM_CLIENT", "CLIENT_TYPE", "", "PROJECTION") in row_set
+
+
+def test_alias_projection_keeps_physical_source_column_name_through_nested_subquery():
+    """CLIENT_NO (alias) phải truy vết về BORROWER của STA_CL_LOAN, không phải CLIENT_NO giả."""
+    sql = """
+        SELECT CLIENT_NO, CL.CLIENT_TYPE
+        FROM (
+            SELECT A.LOAN_NO, B.BORROWER AS CLIENT_NO
+            FROM KMDW.FT_LOAN_GUARANTEE A, KMDW.STA_CL_LOAN B
+            WHERE A.LOAN_NO = B.LOAN_NO
+        ) A,
+        KMDW.DM_CLIENT CL,
+        KMDW.STA_FM_COLL_CERT CO
+        WHERE A.CLIENT_NO = CL.CLIENT_NO
+    """
+    rows = _extract_rows(sql)
+    row_set = _as_set(rows)
+
+    assert ("", "KMDW", "STA_CL_LOAN", "BORROWER", "", "PROJECTION") in row_set
+    assert ("", "KMDW", "STA_CL_LOAN", "CLIENT_NO", "", "PROJECTION") not in row_set
+
+
+def test_unqualified_unknown_column_in_multi_source_block_is_unresolved_instead_of_wrong_fallback():
+    """Trong block có subquery + nhiều bảng, cột unqualified không tồn tại phải UNRESOLVED thay vì map bừa."""
+    sql = """
+        SELECT UNKNOWN_COL
+        FROM (
+            SELECT T.BRANCH_NO
+            FROM KMDW.FT_LOAN_DD_BALANCE_ALL_V T
+        ) A,
+        KMDW.DM_CLIENT CL
+        WHERE A.BRANCH_NO IS NOT NULL
+    """
+    rows = _extract_rows(sql)
+    row_set = _as_set(rows)
+
+    assert ("", "", "", "UNKNOWN_COL", "UNRESOLVED_TABLE", "PROJECTION") in row_set
+    assert ("", "KMDW", "DM_CLIENT", "UNKNOWN_COL", "TEXT_TABLE_FALLBACK", "PROJECTION") not in row_set
+    assert ("", "KMDW", "FT_LOAN_DD_BALANCE_ALL_V", "UNKNOWN_COL", "TEXT_TABLE_FALLBACK", "PROJECTION") not in row_set
