@@ -692,3 +692,32 @@ def test_alias_currency_from_ft_tf_margin_uses_ccy_not_currency():
 
     assert ("", "KMDW", "FT_TF_MARGIN", "CCY", "", "PROJECTION") in row_set
     assert ("", "KMDW", "FT_TF_MARGIN", "CURRENCY", "", "PROJECTION") not in row_set
+
+
+def test_where_condition_maps_unqualified_columns_for_single_table_query():
+    """WHERE unqualified trong query 1 bảng phải được map vào bảng vật lý."""
+    sql = """
+        SELECT
+            ROW_NUMBER() OVER(ORDER BY SYM_RUN_DATE, CAMPAIGN_ID, SUB_CAMPAIGN_ID) AS NO,
+            SYM_RUN_DATE,
+            CAMPAIGN_ID,
+            SUB_CAMPAIGN_ID,
+            IS_PAID
+        FROM KMDW.FT_CAMP_TRAN
+        WHERE SYM_RUN_DATE = TRUNC(SYSDATE) - 1
+          AND (IS_PAID <> 'S' OR IS_PAID IS NULL)
+          AND CAMPAIGN_ID = 'TUITION'
+    """
+    rows = _extract_rows(sql)
+    target_rows = [
+        row
+        for row in rows
+        if row.get("TABLE", "").upper() == "FT_CAMP_TRAN"
+        and row.get("COLUMN", "").upper() == "SYM_RUN_DATE"
+    ]
+    assert target_rows
+
+    where_texts = [str(row.get("WHERE_CONDITION", "")).upper() for row in target_rows]
+    assert any("FT_CAMP_TRAN.SYM_RUN_DATE = TRUNC(SYSDATE" in text and "- 1" in text for text in where_texts)
+    assert any("FT_CAMP_TRAN.IS_PAID <> 'S' OR FT_CAMP_TRAN.IS_PAID IS NULL" in text for text in where_texts)
+    assert any("FT_CAMP_TRAN.CAMPAIGN_ID = 'TUITION'" in text for text in where_texts)

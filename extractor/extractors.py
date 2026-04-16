@@ -75,8 +75,6 @@ def _pick_physical_row(
 
 
 def _should_resolve_condition_column(column: exp.Column, column_name: str) -> bool:
-    if not (column.table or "").strip():
-        return False
     return not column_name.upper().startswith("V_")
 
 
@@ -132,7 +130,9 @@ def _normalize_predicate_with_resolved_tables(
 def _column_belongs_to_select_context(column: exp.Column, ctx: Any) -> bool:
     alias = (column.table or "").strip().lower()
     if not alias:
-        return False
+        # Cột unqualified chỉ được resolve condition khi block đủ rõ nguồn dữ liệu.
+        # Tránh map sai trong các block nhiều nguồn/subquery phức tạp.
+        return len(ctx.tables) == 1 and not ctx.subqueries
 
     if alias in ctx.alias_map or alias in ctx.subquery_alias_map or alias in ctx.cte_index:
         return True
