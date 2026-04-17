@@ -1,6 +1,7 @@
 from pathlib import Path
 import logging
 import re
+from functools import lru_cache
 from typing import List
 
 from sqlglot import expressions as exp, parse_one
@@ -70,6 +71,133 @@ def _merge_unique_where(values) -> str:
     return predicates[0] + "\nAND " + "\nAND ".join(predicates[1:])
 
 
+def _normalize_identifier(name: str) -> str:
+    """Chuẩn hóa định danh SQL (table/column) để so khớp ổn định."""
+    text = str(name or "").strip()
+    if not text:
+        return ""
+    if "." in text:
+        text = text.split(".")[-1].strip()
+    if text.startswith('"') and text.endswith('"') and len(text) >= 2:
+        text = text[1:-1].replace('""', '"')
+    return text.upper()
+
+
+@lru_cache(maxsize=8192)
+def _extract_column_refs_from_predicate(predicate_sql: str) -> tuple[tuple[str, str], ...]:
+    """Trích xuất danh sách (TABLE, COLUMN) xuất hiện trong 1 predicate."""
+    cleaned = str(predicate_sql or "").strip()
+    if not cleaned:
+        return tuple()
+
+    try:
+        stmt = parse_one(f"SELECT 1 FROM DUAL WHERE {cleaned}", read="oracle")
+        where = stmt.args.get("where")
+        if not isinstance(where, exp.Where) or where.this is None:
+            return tuple()
+
+        refs: list[tuple[str, str]] = []
+        for column in where.this.find_all(exp.Column):
+            if bool(getattr(column, "is_star", False)):
+                continue
+            refs.append(
+                (
+                    _normalize_identifier(column.table or ""),
+                    _normalize_identifier(column.name or ""),
+                )
+            )
+        return tuple(refs)
+    except Exception:
+        return tuple()
+
+
+def _fallback_predicate_matches_column(
+    predicate_sql: str,
+    table_name: str,
+    column_name: str,
+) -> bool:
+    """Fallback regex khi parser không parse được predicate."""
+    target_table = _normalize_identifier(table_name)
+    target_column = _normalize_identifier(column_name)
+    if not target_column:
+        return False
+
+    normalized_predicate = re.sub(
+        r'"([^"]+)"',
+        lambda match: match.group(1).replace('""', '"'),
+        str(predicate_sql or ""),
+    ).upper()
+
+    identifier_char_class = r"A-Z0-9_$#"
+    column_token = re.escape(target_column)
+
+    if target_table:
+        table_token = re.escape(target_table)
+        if re.search(
+            rf"(?<![{identifier_char_class}]){table_token}\s*\.\s*{column_token}(?![{identifier_char_class}])",
+            normalized_predicate,
+        ):
+            return True
+        return bool(
+            re.search(
+                rf"(?<![{identifier_char_class}\.]){column_token}(?![{identifier_char_class}])",
+                normalized_predicate,
+            )
+        )
+
+    return bool(
+        re.search(
+            rf"(?<![{identifier_char_class}])(?:[A-Z0-9_$#]+\s*\.\s*)?{column_token}(?![{identifier_char_class}])",
+            normalized_predicate,
+        )
+    )
+
+
+def _predicate_matches_column(
+    predicate_sql: str,
+    table_name: str,
+    column_name: str,
+) -> bool:
+    """Kiểm tra predicate có áp dụng cho (TABLE, COLUMN) hiện tại hay không."""
+    target_table = _normalize_identifier(table_name)
+    target_column = _normalize_identifier(column_name)
+    if not target_column:
+        return False
+
+    refs = _extract_column_refs_from_predicate(str(predicate_sql or ""))
+    if refs:
+        for ref_table, ref_column in refs:
+            if ref_column != target_column:
+                continue
+            # ref_table rỗng nghĩa là cột unqualified -> cho phép map theo cột hiện tại.
+            if not target_table or not ref_table or ref_table == target_table:
+                return True
+        return False
+
+    return _fallback_predicate_matches_column(predicate_sql, table_name, column_name)
+
+
+def _where_for_current_column(
+    where_text: str,
+    table_name: str,
+    column_name: str,
+) -> str:
+    """Lấy WHERE_CONDITION chỉ gồm các predicate liên quan trực tiếp tới cột hiện tại."""
+    raw = str(where_text or "").strip()
+    if not raw or not _normalize_identifier(column_name):
+        return ""
+
+    matched_predicates: list[str] = []
+    chunks = [chunk.strip() for chunk in re.split(r"[;]+", raw) if chunk.strip()]
+    for chunk in chunks:
+        predicates = _extract_predicates_from_text(chunk)
+        for predicate in predicates:
+            if _predicate_matches_column(predicate, table_name, column_name):
+                matched_predicates.append(predicate)
+
+    return _merge_unique_where(matched_predicates)
+
+
 def _has_select_star(sql_text: str) -> bool:
     """Kiểm tra SELECT list có chứa * hay alias.* để cảnh báo tự rà soát."""
     text = str(sql_text or "").strip()
@@ -134,25 +262,38 @@ def main() -> None:
     )
     output_df = output_df.loc[data_mask]
 
-    # Tách riêng xử lý WHERE_CONDITION theo cấp bảng để không bị mất do dedup theo cột.
-    table_where_df = output_df.loc[
-        output_df["WHERE_CONDITION"].fillna("").astype(str).str.strip().ne(""),
-        ["SCHEMA", "TABLE", "DBLINK", "WHERE_CONDITION"],
-    ].copy()
-    table_where_df["WHERE_CONDITION"] = table_where_df["WHERE_CONDITION"].astype(str).str.strip()
-    table_where_df = table_where_df.drop_duplicates(
-        subset=["SCHEMA", "TABLE", "DBLINK", "WHERE_CONDITION"]
-    )
-    table_where_map = (
-        table_where_df
-        .groupby(["SCHEMA", "TABLE", "DBLINK"], dropna=False, sort=False)["WHERE_CONDITION"]
-        .agg(_merge_unique_where)
-        .reset_index()
-        .rename(columns={"WHERE_CONDITION": "_WHERE_CONDITION_TABLE"})
+    # Chỉ giữ điều kiện tương ứng với cột hiện tại của từng dòng.
+    output_df["_WHERE_CONDITION_COLUMN"] = output_df.apply(
+        lambda row: _where_for_current_column(
+            row.get("WHERE_CONDITION", ""),
+            row.get("TABLE", ""),
+            row.get("COLUMN", ""),
+        ),
+        axis=1,
     )
 
-    output_df["_has_where"] = output_df["WHERE_CONDITION"].fillna("").str.len().gt(0).astype(int)
-    output_df["_where_len"] = output_df["WHERE_CONDITION"].fillna("").str.len()
+    # Gom điều kiện theo đúng khóa (SCHEMA, TABLE, DBLINK, COLUMN)
+    # để không mất predicate khi drop_duplicates.
+    column_where_df = output_df.loc[
+        output_df["_WHERE_CONDITION_COLUMN"].fillna("").astype(str).str.strip().ne(""),
+        ["SCHEMA", "TABLE", "DBLINK", "COLUMN", "_WHERE_CONDITION_COLUMN"],
+    ].copy()
+    column_where_df["_WHERE_CONDITION_COLUMN"] = (
+        column_where_df["_WHERE_CONDITION_COLUMN"].astype(str).str.strip()
+    )
+    column_where_df = column_where_df.drop_duplicates(
+        subset=["SCHEMA", "TABLE", "DBLINK", "COLUMN", "_WHERE_CONDITION_COLUMN"]
+    )
+    column_where_map = (
+        column_where_df
+        .groupby(["SCHEMA", "TABLE", "DBLINK", "COLUMN"], dropna=False, sort=False)["_WHERE_CONDITION_COLUMN"]
+        .agg(_merge_unique_where)
+        .reset_index()
+        .rename(columns={"_WHERE_CONDITION_COLUMN": "_WHERE_CONDITION_COLUMN_MERGED"})
+    )
+
+    output_df["_has_where"] = output_df["_WHERE_CONDITION_COLUMN"].fillna("").str.len().gt(0).astype(int)
+    output_df["_where_len"] = output_df["_WHERE_CONDITION_COLUMN"].fillna("").str.len()
     output_df = output_df.sort_values(
         by=["SCHEMA", "TABLE", "DBLINK", "COLUMN", "_has_where", "_where_len"],
         ascending=[True, True, True, True, False, False],
@@ -161,19 +302,24 @@ def main() -> None:
     )
     output_df = output_df.drop_duplicates(subset=["SCHEMA", "TABLE", "DBLINK", "COLUMN"]).reset_index(drop=True)
 
-    if not table_where_map.empty:
+    if not column_where_map.empty:
         output_df = output_df.merge(
-            table_where_map,
-            on=["SCHEMA", "TABLE", "DBLINK"],
+            column_where_map,
+            on=["SCHEMA", "TABLE", "DBLINK", "COLUMN"],
             how="left",
         )
-        output_df["WHERE_CONDITION"] = output_df["_WHERE_CONDITION_TABLE"].where(
-            output_df["_WHERE_CONDITION_TABLE"].fillna("").str.strip().ne(""),
-            output_df["WHERE_CONDITION"],
+        output_df["WHERE_CONDITION"] = output_df["_WHERE_CONDITION_COLUMN_MERGED"].where(
+            output_df["_WHERE_CONDITION_COLUMN_MERGED"].fillna("").str.strip().ne(""),
+            output_df["_WHERE_CONDITION_COLUMN"],
         )
+    else:
+        output_df["WHERE_CONDITION"] = output_df["_WHERE_CONDITION_COLUMN"]
 
     output_df = output_df.drop(columns=["_has_where", "_where_len"], errors="ignore")
-    output_df = output_df.drop(columns=["_WHERE_CONDITION_TABLE"], errors="ignore")
+    output_df = output_df.drop(
+        columns=["_WHERE_CONDITION_COLUMN", "_WHERE_CONDITION_COLUMN_MERGED"],
+        errors="ignore",
+    )
     write_output_excel(output_df, output_path)
 
 if __name__ == "__main__":
