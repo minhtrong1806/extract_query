@@ -8,9 +8,9 @@ from sqlglot.errors import ParseError, TokenError
 
 from models import ParseResult
 
-PLACEHOLDER_PATTERN = re.compile(r"#([^#]+)#")
+PLACEHOLDER_PATTERN = re.compile(r"#\s*([A-Za-z_][A-Za-z0-9_]*)\s*#")
 DYNAMIC_CONCAT_PATTERN = re.compile(
-    r"'{1,3}\s*\|\|\s*([A-Za-z_][A-Za-z0-9_]*)\s*\|\|\s*'{1,3}",
+    r"'{3}\s*\|\|\s*([A-Za-z_][A-Za-z0-9_]*)\s*\|\|\s*'{3}",
     re.IGNORECASE,
 )
 INLINE_SELECT_INJECTION_PATTERN = re.compile(
@@ -18,14 +18,16 @@ INLINE_SELECT_INJECTION_PATTERN = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 LITERAL_CONCAT_PATTERN = re.compile(
-    r"'{1,3}\s*\|\|\s*'([^']*)'\s*\|\|\s*'{1,3}",
+    r"'{3}\s*\|\|\s*'([^']*)'\s*\|\|\s*'{3}",
     re.IGNORECASE,
 )
-QUOTED_CHUNK_CONCAT_PATTERN = re.compile(r"'\s*\|\|\s*'", re.IGNORECASE)
+QUOTED_CHUNK_CONCAT_PATTERN = re.compile(r"'{3}\s*\|\|\s*'{3}", re.IGNORECASE)
 GENERIC_CONCAT_VAR_PATTERN = re.compile(
     r"\|\|\s*([A-Za-z_][A-Za-z0-9_]*)\s*\|\|",
     re.IGNORECASE,
 )
+CTE_UNION_EXTRA_CLOSE_PATTERN = re.compile(r"\)\s*\)\s*(UNION(?:\s+ALL)?)", re.IGNORECASE)
+READ_DIALECT = "oracle"
 
 
 def _mask_placeholders(statement: str) -> Tuple[str, Dict[str, str]]:
@@ -48,6 +50,8 @@ def _normalize_dynamic_sql(statement: str) -> str:
     normalized = GENERIC_CONCAT_VAR_PATTERN.sub(lambda m: f"#{m.group(1)}#", normalized)
     normalized = LITERAL_CONCAT_PATTERN.sub(lambda m: f"'{m.group(1)}'", normalized)
     normalized = QUOTED_CHUNK_CONCAT_PATTERN.sub("", normalized)
+    if normalized.lstrip().upper().startswith("WITH"):
+        normalized = CTE_UNION_EXTRA_CLOSE_PATTERN.sub(r") \1", normalized, count=1)
     normalized = INLINE_SELECT_INJECTION_PATTERN.sub("", normalized)
     normalized = re.sub(r",\s*SELECT\s+", ", ", normalized, flags=re.IGNORECASE)
     normalized = re.sub(r"(#[A-Za-z_][A-Za-z0-9_]*#)'(\s*,)", r"\1\2", normalized)
@@ -60,7 +64,6 @@ def _normalize_dynamic_sql(statement: str) -> str:
     )
     normalized = re.sub(r"PARTITION\s*\(\s*P\s*#([^#]+)#\s*\)", "", normalized, flags=re.IGNORECASE)
     normalized = re.sub(r"PARTITION\s*\([^\)]*\)", "", normalized, flags=re.IGNORECASE)
-    normalized = normalized.replace("''", "'")
     if normalized.count("'") % 2 == 1:
         normalized = re.sub(r"'\s*$", "", normalized)
     normalized = re.sub(r"'\s*;\s*$", ";", normalized)
@@ -81,13 +84,13 @@ def parse_select_statement(statement: object) -> ParseResult:
 
     try:
         masked_statement, placeholder_map = _mask_placeholders(statement)
-        ast = parse_one(masked_statement, read="oracle")
+        ast = parse_one(masked_statement, read=READ_DIALECT)
         return ParseResult(ast=ast, placeholder_map=placeholder_map, error=None)
     except (ParseError, TokenError, ValueError) as exc:
         try:
             normalized_statement = _normalize_dynamic_sql(statement)
             masked_statement, placeholder_map = _mask_placeholders(normalized_statement)
-            ast = parse_one(masked_statement, read="oracle")
+            ast = parse_one(masked_statement, read=READ_DIALECT)
             return ParseResult(ast=ast, placeholder_map=placeholder_map, error=None)
         except (ParseError, TokenError, ValueError) as normalized_exc:
             return ParseResult(ast=None, placeholder_map={}, error=f"{exc} | normalized: {normalized_exc}")

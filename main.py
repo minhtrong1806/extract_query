@@ -10,6 +10,8 @@ from io_excel import read_excel_data, write_output_excel
 from parser import parse_select_statement
 from pipeline import build_output_dataframe
 
+READ_DIALECT = "oracle"
+
 
 def _split_and_predicates(expression: exp.Expression) -> List[exp.Expression]:
     if isinstance(expression, exp.And):
@@ -25,7 +27,7 @@ def _extract_predicates_from_text(where_text: str) -> List[str]:
         return []
 
     try:
-        stmt = parse_one(f"SELECT 1 FROM DUAL WHERE {cleaned}", read="oracle")
+        stmt = parse_one(f"SELECT 1 FROM DUAL WHERE {cleaned}", read=READ_DIALECT)
         where = stmt.args.get("where")
         if not isinstance(where, exp.Where) or where.this is None:
             return [cleaned]
@@ -80,6 +82,9 @@ def _normalize_identifier(name: str) -> str:
         text = text.split(".")[-1].strip()
     if text.startswith('"') and text.endswith('"') and len(text) >= 2:
         text = text[1:-1].replace('""', '"')
+    # So khớp ổn định giữa TABLE và TABLE@DBLINK trong WHERE_CONDITION.
+    if "@" in text:
+        text = text.split("@", 1)[0].strip()
     return text.upper()
 
 
@@ -91,7 +96,7 @@ def _extract_column_refs_from_predicate(predicate_sql: str) -> tuple[tuple[str, 
         return tuple()
 
     try:
-        stmt = parse_one(f"SELECT 1 FROM DUAL WHERE {cleaned}", read="oracle")
+        stmt = parse_one(f"SELECT 1 FROM DUAL WHERE {cleaned}", read=READ_DIALECT)
         where = stmt.args.get("where")
         if not isinstance(where, exp.Where) or where.this is None:
             return tuple()
@@ -262,6 +267,10 @@ def main() -> None:
     )
     output_df = output_df.loc[data_mask]
 
+    if output_df.empty:
+        write_output_excel(output_df, output_path)
+        return
+
     # Chỉ giữ điều kiện tương ứng với cột hiện tại của từng dòng.
     output_df["_WHERE_CONDITION_COLUMN"] = output_df.apply(
         lambda row: _where_for_current_column(
@@ -292,8 +301,9 @@ def main() -> None:
         .rename(columns={"_WHERE_CONDITION_COLUMN": "_WHERE_CONDITION_COLUMN_MERGED"})
     )
 
-    output_df["_has_where"] = output_df["_WHERE_CONDITION_COLUMN"].fillna("").str.len().gt(0).astype(int)
-    output_df["_where_len"] = output_df["_WHERE_CONDITION_COLUMN"].fillna("").str.len()
+    where_series = output_df["_WHERE_CONDITION_COLUMN"].fillna("").astype(str)
+    output_df["_has_where"] = where_series.str.len().gt(0).astype(int)
+    output_df["_where_len"] = where_series.str.len()
     output_df = output_df.sort_values(
         by=["SCHEMA", "TABLE", "DBLINK", "COLUMN", "_has_where", "_where_len"],
         ascending=[True, True, True, True, False, False],

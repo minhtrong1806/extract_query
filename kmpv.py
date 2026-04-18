@@ -12,6 +12,8 @@ from sqlglot import expressions as exp, parse_one
 from extractor import extract_schema_table_column_rows
 from parser import parse_select_statement
 
+READ_DIALECT = "oracle"
+
 
 ANSI_ESCAPE_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
 ILLEGAL_XLSX_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F]")
@@ -63,7 +65,7 @@ def _extract_predicates_from_text(where_text: str) -> List[str]:
         return []
 
     try:
-        stmt = parse_one(f"SELECT 1 FROM DUAL WHERE {cleaned}", read="oracle")
+        stmt = parse_one(f"SELECT 1 FROM DUAL WHERE {cleaned}", read=READ_DIALECT)
         where = stmt.args.get("where")
         if not isinstance(where, exp.Where) or where.this is None:
             return [cleaned]

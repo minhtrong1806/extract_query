@@ -47,6 +47,14 @@ def test_where_for_current_column_handles_quoted_identifiers():
     assert "OTHER_COL" not in result
 
 
+def test_where_for_current_column_matches_table_with_dblink_suffix():
+    where_text = '"CL_ACCRUALS_TBL@KMAPP_TO_EOC".DD_KEY = "CL_DRAWDOWN_TBL@KMAPP_TO_EOC".DD_KEY'
+
+    result = main._where_for_current_column(where_text, "CL_ACCRUALS_TBL", "DD_KEY").upper()
+
+    assert '"CL_ACCRUALS_TBL@KMAPP_TO_EOC".DD_KEY = "CL_DRAWDOWN_TBL@KMAPP_TO_EOC".DD_KEY' in result
+
+
 def test_predicate_matches_column_uses_regex_fallback_when_parse_unavailable(monkeypatch):
     monkeypatch.setattr(main, "_extract_column_refs_from_predicate", lambda _predicate: tuple())
 
